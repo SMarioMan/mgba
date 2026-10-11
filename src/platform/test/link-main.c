@@ -87,7 +87,10 @@ static unsigned emulationErrors;
 
 static void logMessage(struct mLogger* logger, int category, enum mLogLevel level, const char* format, va_list args) {
 	UNUSED(logger);
-	if (level & (mLOG_ERROR | mLOG_FATAL)) {
+	/* CpuSet alignment diagnostics still execute the BIOS implementation.
+	 * Unsupported BIOS calls, unlike those diagnostics, fail the run. */
+	if ((level & (mLOG_ERROR | mLOG_FATAL)) ||
+	    (!strcmp(mLogCategoryName(category), "GBA BIOS") && (level & mLOG_STUB))) {
         if (++emulationErrors > 20) return;
 		fprintf(stderr, "%s: ", mLogCategoryName(category));
 		vfprintf(stderr, format, args);
@@ -174,8 +177,9 @@ int main(int argc, char** argv) {
 	uint32_t barrierState = 0, untilScene = 0;
 	unsigned dumpWords = 32;
 	unsigned keySlots = 4, autodriveFrame = UINT_MAX, debugStepFrame = UINT_MAX;
-	bool ringMode = false, expectPoc = false, autofire = false;
+	bool ringMode = false, expectPoc = false, autofire = false, hle = false;
 	for (int i = 1; i < argc; ++i) {
+		if (!strcmp(argv[i], "--hle")) { hle = true; continue; }
 		if (!strcmp(argv[i], "--autofire")) { autofire = true; continue; }
 		if (!strcmp(argv[i], "--ring")) { ringMode = true; continue; }
 		if (!strcmp(argv[i], "--expect-poc")) { expectPoc = true; continue; }
@@ -206,8 +210,8 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--restore-frame") && number(value, &n) && n < UINT_MAX) restoreFrame = n;
 		else { fprintf(stderr, "Invalid option: %s %s\n", option, value); return 2; }
 	}
-	if (!rom || !bios || players < (ringMode ? 2U : 1U) || players > (ringMode ? 8U : 4U) || !frames || expectHost >= players || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
-		fprintf(stderr, "Usage: mgba-link --rom FILE --bios FILE --players 1..4 [--ring (2..8)] [--frames N] [--input CSV] [--screens PREFIX] [--watch ADDRESS] [--expect-poc]\n");
+	if (!rom || (!hle && !bios) || (hle && bios) || players < (ringMode ? 2U : 1U) || players > (ringMode ? 8U : 4U) || !frames || expectHost >= players || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
+		fprintf(stderr, "Usage: mgba-link --rom FILE (--bios FILE | --hle) --players 1..4 [--ring (2..8)] [--frames N] [--input CSV] [--screens PREFIX] [--watch ADDRESS] [--expect-poc]\n");
 		return 2;
 	}
 	struct Input* inputs = NULL;
@@ -252,22 +256,27 @@ int main(int argc, char** argv) {
 		if (!core || !core->init(core)) { fprintf(stderr, "Core init failed\n"); goto done; }
 		++initialized;
 		mCoreInitConfig(core, "link-test");
-		mCoreConfigSetDefaultIntValue(&core->config, "useBios", true);
-		mCoreConfigSetDefaultIntValue(&core->config, "skipBios", false);
+		mCoreConfigSetDefaultIntValue(&core->config, "useBios", !hle);
+		mCoreConfigSetDefaultIntValue(&core->config, "skipBios", hle);
 		mCoreConfigSetDefaultValue(&core->config, "idleOptimization", "ignore");
 		mCoreConfigSetDefaultIntValue(&core->config, "mute", true);
 		mCoreLoadConfig(core);
+		core->opts.useBios = !hle;
+		core->opts.skipBios = hle;
 		core->setVideoBuffer(core, p[i].pixels, 240);
         struct mCoreCallbacks callbacks = { .context = &p[i], .videoFrameEnded = captureFrame };
         core->addCoreCallbacks(core, &callbacks);
-		struct VFile* vf = VFileOpen(bios, O_RDONLY);
-		if (!vf || vf->size(vf) != 16384 || !GBAIsBIOS(vf)) {
-			if (vf) vf->close(vf);
-			fprintf(stderr, "A valid 16 KiB GBA BIOS is required\n"); goto done;
+		if (!hle) {
+			struct VFile* vf = VFileOpen(bios, O_RDONLY);
+			if (!vf || vf->size(vf) != 16384 || !GBAIsBIOS(vf)) {
+				if (vf) vf->close(vf);
+				fprintf(stderr, "A valid 16 KiB GBA BIOS is required\n"); goto done;
+			}
+			if (!core->loadBIOS(core, vf, 0)) {
+				fprintf(stderr, "BIOS/ROM load failed\n"); goto done;
+			}
 		}
-		if (!core->loadBIOS(core, vf, 0) || !mCoreLoadFile(core, rom)) {
-			fprintf(stderr, "BIOS/ROM load failed\n"); goto done;
-		}
+		if (!mCoreLoadFile(core, rom)) { fprintf(stderr, "ROM load failed\n"); goto done; }
 		struct GBA* gba = core->board;
 		if (ringMode) {
 			if (!GBASIORingAttach(&ring, &p[i].ring)) goto done;
@@ -281,6 +290,7 @@ int main(int argc, char** argv) {
 			GBASIOSetDriver(&gba->sio, &p[i].stock.d);
 		}
 		core->reset(core);
+		if ((hle && gba->biosVf) || (!hle && !gba->biosVf)) { fprintf(stderr, "Requested BIOS mode was not applied\n"); goto done; }
 		if (ringMode) {
 			p[i].quantum = (struct mTimingEvent) { .context = &p[i], .callback = yieldRingCore, .name = "Ring runner scheduling quantum", .priority = 0xFF };
 			mTimingSchedule(core->timing, &p[i].quantum, 256);
@@ -420,7 +430,7 @@ int main(int argc, char** argv) {
 	}
 	free(applied);
 	result = snapshotFailed || (untilScene && !allSceneMatch) ? 1 : 0;
-	printf("{\"topology\":\"%s\",\"players\":%u,\"frames\":%u,\"steps\":%llu,\"transfers\":%llu,\"missedReceivers\":%llu,\"collisions\":%llu,\"nodes\":[", ringMode ? "ring" : "stock", players, frames, (unsigned long long) steps, (unsigned long long) ring.transfers, (unsigned long long) ring.missedReceivers, (unsigned long long) ring.collisions);
+	printf("{\"bios\":\"%s\",\"topology\":\"%s\",\"players\":%u,\"frames\":%u,\"steps\":%llu,\"transfers\":%llu,\"missedReceivers\":%llu,\"collisions\":%llu,\"nodes\":[", hle ? "hle" : "real", ringMode ? "ring" : "stock", players, frames, (unsigned long long) steps, (unsigned long long) ring.transfers, (unsigned long long) ring.missedReceivers, (unsigned long long) ring.collisions);
 	for (unsigned i = 0; i < players; ++i) {
 		struct mCore* core = p[i].core;
 		int32_t pc = 0;
