@@ -41,7 +41,7 @@ static bool _start(struct GBASIODriver* d) {
 	return !_handles(d, d->p->mode);
 }
 
-static uint16_t _write(struct GBASIODriver* d, uint16_t value) {
+static uint16_t _ring_write(struct GBASIODriver* d, uint16_t value) {
 	struct GBASIORingDriver* p = (struct GBASIORingDriver*) d;
 	struct GBASIORing* ring = p->ring;
 	bool wasArmed = GBASIONormalIsStart(d->p->siocnt);
@@ -139,7 +139,7 @@ bool GBASIORingAttach(struct GBASIORing* ring, struct GBASIORingDriver* p) {
 	p->d.setMode = _mode;
 	p->d.handlesMode = _handles;
 	p->d.connectedDevices = _connected;
-	p->d.writeSIOCNT = _write;
+	p->d.writeSIOCNT = _ring_write;
 	p->d.start = _start;
 	p->event.context = p;
 	p->event.callback = _finish;
