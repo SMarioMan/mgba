@@ -24,9 +24,39 @@ struct Player {
 	bool asleep;
 };
 
+static FILE* videoLog;
+static unsigned videoFrom;
+
 static void captureFrame(void* context) {
     struct Player* player = context;
     memcpy(player->completedPixels, player->pixels, sizeof(player->pixels));
+    unsigned frame = player->core->frameCounter(player->core);
+    if (videoLog && frame >= videoFrom) {
+        struct GBA* gba = player->core->board;
+        unsigned dispcnt = player->core->busRead16(player->core, 0x04000000);
+        unsigned slots[8] = {0}, active = 0, invalid = 0, markers = 0;
+        for (unsigned i = 0; i < 128; ++i) {
+            uint16_t* obj = gba->video.oam.raw + i * 4;
+            if ((obj[0] & 0x300) == 0x200) continue;
+            ++active;
+            if ((obj[0] >> 14) == 3) ++invalid;
+            unsigned tile = obj[2] & 1023;
+            if (tile >= 512) ++slots[(tile - 512) / 64];
+            if (tile == 0x132 && (obj[2] >> 12) >= 8) ++markers;
+        }
+        fprintf(videoLog, "%u,%u,%u,%u,%u", frame, player->id,
+                dispcnt, active,
+                player->core->rawRead32(player->core, 0x03006B90, -1));
+        for (unsigned i = 0; i < 8; ++i) fprintf(videoLog, ",%u", slots[i]);
+        uint32_t bitmapHash = 0;
+        if ((dispcnt & 7) == 4) {
+            bitmapHash = 2166136261U;
+            for (unsigned i = 0; i < 240 * 160; ++i)
+                bitmapHash = (bitmapHash ^ player->completedPixels[i]) * 16777619U;
+        }
+        fprintf(videoLog, ",%u,%u,%u", invalid, markers, bitmapHash);
+        fputc('\n', videoLog);
+    }
 }
 
 static uint32_t snapshotWord(struct mCore* core, uint32_t address) {
@@ -119,7 +149,8 @@ struct Route {
 /* A test driver sends only keypad input. It observes the native checkpoint
  * route and kart heading, and never changes race RAM or human/CPU flags. */
 static void drivePlayer(struct mCore* core, unsigned slot, struct Route* route, bool autofire) {
-    if ((core->busRead16(core, 0x04000000) & 7) == 3) {
+    unsigned videoMode = core->busRead16(core, 0x04000000) & 7;
+    if (videoMode == 3 || videoMode == 4) {
         if (!route->inMenu) core->setKeys(core, 0);
         route->inMenu = true;
         return;
@@ -167,12 +198,13 @@ static bool number(const char* text, unsigned long* out) {
 int main(int argc, char** argv) {
 	struct mLogger logger = { .log = logMessage };
 	mLogSetDefaultLogger(&logger);
-	const char *rom = NULL, *bios = NULL, *inputPath = NULL, *prefix = NULL, *tracePath = NULL;
+	const char *rom = NULL, *bios = NULL, *inputPath = NULL, *prefix = NULL, *tracePath = NULL, *videoPath = NULL;
 	unsigned players = 0, frames = 600;
 	unsigned expectHost = 0, breakFrame = UINT_MAX, restoreFrame = UINT_MAX;
 	uint32_t watch = 0, untilWatchValue = 0;
     bool untilWatch = false;
 	uint32_t traceAddress = 0;
+	unsigned tracePlayer = 0;
 	uint32_t dumpAddress = 0, keysAddress = 0x03004F30;
 	uint32_t barrierState = 0, untilScene = 0;
 	unsigned dumpWords = 32;
@@ -191,7 +223,10 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--bios")) bios = value;
 		else if (!strcmp(option, "--input")) inputPath = value;
 		else if (!strcmp(option, "--screens")) prefix = value;
+		else if (!strcmp(option, "--video-log")) videoPath = value;
+		else if (!strcmp(option, "--video-from") && number(value, &n) && n <= 100000) videoFrom = n;
 		else if (!strcmp(option, "--trace-file")) tracePath = value;
+		else if (!strcmp(option, "--trace-player") && number(value, &n) && n < 8) tracePlayer = n;
 		else if (!strcmp(option, "--until-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) untilScene = n;
 		else if (!strcmp(option, "--barrier-state") && number(value, &n) && n >= 0x03000000 && n <= 0x03007F88) barrierState = n;
 		else if (!strcmp(option, "--trace-memory") && number(value, &n) && n < UINT32_MAX - 16) traceAddress = n;
@@ -210,7 +245,7 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--restore-frame") && number(value, &n) && n < UINT_MAX) restoreFrame = n;
 		else { fprintf(stderr, "Invalid option: %s %s\n", option, value); return 2; }
 	}
-	if (!rom || (!hle && !bios) || (hle && bios) || players < (ringMode ? 2U : 1U) || players > (ringMode ? 8U : 4U) || !frames || expectHost >= players || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
+	if (!rom || (!hle && !bios) || (hle && bios) || players < (ringMode ? 2U : 1U) || players > (ringMode ? 8U : 4U) || !frames || expectHost >= players || tracePlayer >= players || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
 		fprintf(stderr, "Usage: mgba-link --rom FILE (--bios FILE | --hle) --players 1..4 [--ring (2..8)] [--frames N] [--input CSV] [--screens PREFIX] [--watch ADDRESS] [--expect-poc]\n");
 		return 2;
 	}
@@ -249,6 +284,11 @@ int main(int argc, char** argv) {
 #else
     if (tracePath || traceAddress) { fprintf(stderr, "Memory tracing requires ENABLE_DEBUGGERS\n"); goto done; }
 #endif
+	if (videoPath) {
+		videoLog = fopen(videoPath, "w");
+		if (!videoLog) { perror(videoPath); goto done; }
+		fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash\n");
+	}
 	for (unsigned i = 0; i < players; ++i) {
 		p[i].id = i;
 		p[i].core = GBACoreCreate();
@@ -301,7 +341,7 @@ int main(int argc, char** argv) {
 		trace.output = fopen(tracePath, "w");
 		if (!trace.output) { perror(tracePath); goto done; }
 		mDebuggerInit(&debugger);
-		mDebuggerAttach(&debugger, p[0].core);
+		mDebuggerAttach(&debugger, p[tracePlayer].core);
 		mDebuggerAttachModule(&debugger, &trace.module);
 		debuggerAttached = true;
 		struct mWatchpoint wp = { .segment = -1, .minAddress = traceAddress, .maxAddress = traceAddress + 16, .type = WATCHPOINT_RW };
@@ -407,19 +447,20 @@ int main(int argc, char** argv) {
 			fprintf(stderr, "Link deadlock or instruction budget exhausted\n"); free(applied); goto done;
 		}
 #ifdef ENABLE_DEBUGGERS
-        if (selected == 0 && debuggerAttached && p[0].core->frameCounter(p[0].core) >= debugStepFrame)
+        if (selected == (int) tracePlayer && debuggerAttached && p[tracePlayer].core->frameCounter(p[tracePlayer].core) >= debugStepFrame)
             {
+            struct mCore* traced = p[tracePlayer].core;
             int32_t pc, sp, lr;
-            p[0].core->readRegister(p[0].core, "pc", &pc);
-            p[0].core->readRegister(p[0].core, "sp", &sp);
-            p[0].core->readRegister(p[0].core, "lr", &lr);
-            history[historyIndex++ & 1023] = (struct InstructionHistory) { pc, p[0].core->busRead32(p[0].core, pc & ~1), sp, lr, p[0].core->busRead32(p[0].core, sp) };
+            traced->readRegister(traced, "pc", &pc);
+            traced->readRegister(traced, "sp", &sp);
+            traced->readRegister(traced, "lr", &lr);
+            history[historyIndex++ & 1023] = (struct InstructionHistory) { pc, traced->busRead32(traced, pc & ~1), sp, lr, traced->busRead32(traced, sp) };
             if ((uint32_t)sp < 0x03000000 || (uint32_t)sp >= 0x03008000) {
                 for (unsigned h = 0; h < 1024; ++h) {
                     unsigned index = (historyIndex + h) & 1023;
                     fprintf(stderr, "History %08x ins=%08x sp=%08x lr=%08x top=%08x\n", history[index].pc, history[index].instruction, history[index].sp, history[index].lr, history[index].top);
                 }
-                fprintf(stderr, "Invalid stack at frame %u\n", p[0].core->frameCounter(p[0].core));
+                fprintf(stderr, "Invalid stack at frame %u\n", traced->frameCounter(traced));
                 free(applied); goto done;
             }
             mDebuggerRun(&debugger);
@@ -476,18 +517,24 @@ int main(int argc, char** argv) {
 			for (unsigned j = 0; j < 8; ++j) {
 				uint32_t driver = core->busRead32(core, 0x03003638 + j * 4);
 				bool valid = (driver >= 0x02000000 && driver < 0x0203FFBC) || (driver >= 0x03000000 && driver < 0x03007FBC);
+				uint32_t graphics = valid ? core->busRead32(core, driver + 0xD0) : 0;
+				unsigned mip = valid ? core->busRead8(core, driver + 0x19C) : 255;
+				unsigned bytes = mip <= 2 ? 2048U >> (mip * 2) : 0;
+				bool graphicsMatch = bytes && graphics >= 0x08000000 && graphics < 0x0A000000 - bytes;
+				for (unsigned offset = 0; graphicsMatch && offset < bytes; offset += 4)
+					graphicsMatch = core->rawRead32(core, graphics + offset, -1) == core->rawRead32(core, 0x06014000 + j * 2048 + offset, -1);
 				printf("%s{\"address\":%u,\"position\":[%d,%d,%d]", j ? "," : "", driver,
 				       valid ? (int32_t) core->busRead32(core, driver) : 0,
 				       valid ? (int32_t) core->busRead32(core, driver + 4) : 0,
 				       valid ? (int32_t) core->busRead32(core, driver + 8) : 0);
-                printf(",\"id\":%u,\"character\":%u,\"yaw\":%u,\"checkpoint\":%u,\"lap\":%u,\"balloons\":%u,\"graphicsSource\":%u}",
+                printf(",\"id\":%u,\"character\":%u,\"yaw\":%u,\"checkpoint\":%u,\"lap\":%u,\"balloons\":%u,\"graphicsSource\":%u,\"graphicsBytes\":%u,\"graphicsMatch\":%s}",
                        valid ? core->busRead8(core, driver + 0xEC) : 255,
                        valid ? core->busRead8(core, driver + 0x4C) : 255,
                        valid ? core->busRead16(core, driver + 0x7C) : 0,
                        valid ? core->busRead8(core, driver + 0x90) & 127 : 0,
                        valid ? (int) core->busRead8(core, driver + 0xC7) - 127 : 0,
                        valid ? core->busRead8(core, driver + 0x17D) : 0,
-                       valid ? core->busRead32(core, driver + 0xD0) : 0);
+                       graphics, bytes, graphicsMatch ? "true" : "false");
 			}
 			printf("]}");
 			uint32_t menu = core->busRead32(core, 0x0203EBE8);
@@ -529,11 +576,12 @@ done:
 #ifdef ENABLE_DEBUGGERS
 	if (debuggerAttached) {
 		mDebuggerDetachModule(&debugger, &trace.module);
-		p[0].core->detachDebugger(p[0].core);
+		p[tracePlayer].core->detachDebugger(p[tracePlayer].core);
 		mDebuggerDeinit(&debugger);
 	}
 	if (trace.output) fclose(trace.output);
 #endif
+	if (videoLog && fclose(videoLog)) result = 1;
 	for (unsigned i = 0; i < initialized; ++i) {
 		if (ringMode) mTimingDeschedule(p[i].core->timing, &p[i].quantum);
 		if (ringMode && p[i].ring.ring) GBASIORingDetach(&p[i].ring);

@@ -79,6 +79,16 @@ video frames exits with an error. This only controls emulator scheduling.
 zero and writes frame, PC, address, width, access kind, and written value as CSV;
 this option requires `ENABLE_DEBUGGERS`.
 
+`--trace-player N` selects the console observed by memory tracing and explicit
+instruction stepping. `--video-log PATH --video-from N` records every completed
+frame from N onward as CSV: display mode/page, active and invalid OAM entries,
+each native kart texture slot's sprite count, identity marker count, input
+commits, and a Mode 4 completed-bitmap hash. Game snapshots also report each
+driver's native texture source, byte count, and whether its VRAM bank matches.
+These observations do not alter game RAM. The MKSC `test_rendering.py` uses
+them to distinguish sprite loss, texture corruption, and bitmap tearing from
+ordinary movement or occlusion.
+
 MKSC READY probes can encounter consoles still rendering; those idle transfers
 increase `missedReceivers`. Protected input trains must instead pass the game's
 CRC, duplicate, sequence and commit checks. The homebrew's fully armed transfers
