@@ -56,8 +56,42 @@ armed. Late mode changes and resets cancel the affected transfer. A second
 clock owner attempting an overlapping transfer increments collisions.
 
 Attached cores must run in one thread in timestamp order. The runner uses
-instruction-level stepping for the ring and stock lockstep event boundaries for
-the normal cable. This driver is not integrated into Qt, a network lobby, or
+a recurring 256-cycle scheduling event for the ring, including BIOS HALT,
+and stock lockstep event boundaries for the normal cable. This driver is not integrated into Qt, a network lobby, or
 savestates. Intermediate bit-edge visibility, partial shifts, electrical cable
 characteristics, hot attachment, and multi-threaded ring emulation are outside
 its present model.
+
+`--dump ADDRESS` reads 32 words per console. `--keys-address ADDRESS` and
+`--key-slots 1..8` select the held-key diagnostic vector for a shifted build.
+`--barrier-state ADDRESS` accepts the MKSC ring state in IWRAM: after the
+requested video-frame threshold, all consoles stop at the same future input
+round, before physics starts. Failure to reach that barrier within 240 further
+video frames exits with an error. This only controls emulator scheduling.
+`displayRegisters` reports cached display IO, including write-only affine values.
+`--trace-memory ADDRESS --trace-file PATH` observes a 16-byte range on console
+zero and writes frame, PC, address, width, access kind, and written value as CSV;
+this option requires `ENABLE_DEBUGGERS`.
+
+MKSC READY probes can encounter consoles still rendering; those idle transfers
+increase `missedReceivers`. Protected input trains must instead pass the game's
+CRC, duplicate, sequence and commit checks. The homebrew's fully armed transfers
+still require zero misses. Test ROMs should be copied to an immutable path before
+starting a run: changing a memory-mapped ROM during emulation invalidates results.
+
+The stock runner also accepts one console for ordinary GP regressions.
+`--dump-words 1..4096` changes the snapshot size; snapshots use debugger reads
+rather than executing game instructions. PPM files capture completed video
+frames, avoiding a partly drawn framebuffer at a protocol barrier.
+`--until-scene ADDRESS` waits until all cores reach the requested scene before
+arming the end barrier; `--frames` then sets the maximum wait budget.
+`--watch ADDRESS --until-watch-value VALUE` additionally waits for that 32-bit
+value on every core, useful for cumulative results. Failed scene/barrier waits
+still emit diagnostic JSON and screenshots and return a nonzero exit status.
+
+`--autodrive-frame N` observes the native AMKE route and local driver's heading
+and sends keypad steering after frame N. Large heading errors use A+B quick
+turning. `--autofire` periodically presses L. These helpers never modify race
+RAM, and are ROM-specific test controllers rather than emulator features for
+arbitrary games. Emulator errors stop the run and fail it. Optional
+`--debug-step-frame N` supports instruction-level failure diagnosis.
