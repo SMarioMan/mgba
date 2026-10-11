@@ -215,6 +215,16 @@ int main(int argc, char** argv) {
 		for (unsigned j = 0; j < 8; ++j) printf("%s%u", j ? "," : "", core->busRead32(core, 0x02000020 + j * 4));
 		printf("]}");
 		if (!ringMode) {
+			printf(",\"game\":{\"sceneMain\":%u,\"humanCount\":%u,\"localId\":%u,\"raceFlags\":%u,\"drivers\":[", core->busRead32(core, 0x03002E20), core->busRead8(core, 0x0300361B), core->busRead8(core, 0x0300361C), core->busRead16(core, 0x0300361E));
+			for (unsigned j = 0; j < 8; ++j) {
+				uint32_t driver = core->busRead32(core, 0x03003638 + j * 4);
+				bool valid = (driver >= 0x02000000 && driver < 0x0203FFBC) || (driver >= 0x03000000 && driver < 0x03007FBC);
+				printf("%s{\"address\":%u,\"position\":[%d,%d,%d]}", j ? "," : "", driver,
+				       valid ? (int32_t) core->busRead32(core, driver) : 0,
+				       valid ? (int32_t) core->busRead32(core, driver + 4) : 0,
+				       valid ? (int32_t) core->busRead32(core, driver + 8) : 0);
+			}
+			printf("]}");
 			uint32_t menu = core->busRead32(core, 0x0203EBE8);
 			printf(",\"menu\":{\"address\":%u,\"playersMinusOne\":%u,\"localId\":%u,\"state\":%u,\"selection\":[", menu, core->busRead32(core, menu + 8), core->busRead32(core, menu + 12), core->busRead32(core, menu + 0xD84));
 			for (unsigned j = 0; j < 4; ++j) printf("%s%u", j ? "," : "", core->busRead32(core, menu + 0x4FC + j * 4));
