@@ -27,8 +27,16 @@ windows. This feature does not add network play or connected-session savestates.
 
 The threaded adapter runs cores in shared timestamp order, aligns reset/late
 boot clock epochs, and yields at a bounded interval. Armed transfers shorten
-that interval according to native serial timing. Audio/video consumer waits
-occur outside the cable mutex so GUI pause/reset/close can interrupt peers.
+that interval according to native serial timing. Up to 64 slices execute
+cooperatively on one worker, borrowing only peers actually asleep on the
+adapter's WAIT condition. Interrupt acknowledgements wait until that peer's
+slice finishes. This removes an operating-system thread handoff for each tiny
+serial slice without changing cable timing or timestamp order.
+
+Audio/video consumer waits occur outside the cable mutex, on the output owner's
+thread only. A worker yields to a peer needing its consumers instead of waiting
+on that peer's output. This allows GUI pause/reset/close to interrupt the correct
+worker, including when audio/video synchronization is enabled.
 
 `test-qt-ring_gui` uses real Qt windows and the File-menu dialog, then supplies
 keypad inputs to each native core. Private fixtures enable Vs./Battle entry for
@@ -38,11 +46,23 @@ late boot of a second console, and close/reopen checks. Complete-round and synch
 remain covered by the headless harness.
 
 BIOS-backed GUI checks passed for both ring modes with two/eight windows and
-both standard modes with four windows. Synchronized two-window playback and
+both standard modes with four windows. Synchronized two- and eight-window playback and
 staggered boot also passed. The default Qt build has 34 passing CTest targets;
 its fixture-free GUI rows skip explicitly. Concurrent eight-window stress
 runs on the shared cloud VM were below real time; these checks establish
 functional behavior, not desktop throughput.
+
+With the same pre-fix ROM and two-console Vs. input fixture (4,300 emulated
+frames), GUI entry took 58,939 ms with the original adapter and 9,369 ms with
+cooperative scheduling, about 6.3 times faster. These were offscreen runs on
+the cloud VM; they isolate emulator scheduling from the ROM clock/rendering
+changes and do not establish eight-window desktop frame rates.
+
+The Windows-safe `_ring_write` callback rename from `tokenring` commit
+`64ebbcf38` is included. The game-side rendering fixes are also required: the
+stock opponent-marker switch only handles three opponents, and native remote
+texture scheduling can starve slots when ring barriers consume video frames.
+The GUI test rejects invalid sprite shapes during race entry.
 
 ```sh
 export QT_QPA_PLATFORM=offscreen SDL_AUDIODRIVER=dummy

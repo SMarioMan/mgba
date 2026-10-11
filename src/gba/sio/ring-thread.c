@@ -3,6 +3,7 @@
 #include <mgba/internal/gba/sio/ring-thread.h>
 #include <mgba/internal/gba/gba.h>
 #include <mgba/core/core.h>
+#include <mgba-util/audio-buffer.h>
 #ifdef ENABLE_DEBUGGERS
 #include <mgba/debugger/debugger.h>
 #endif
@@ -47,30 +48,54 @@ static void _yield(struct mTiming* timing, void* context, uint32_t late) {
 	mTimingSchedule(timing, &node->quantum, node->coordinator->interval);
 }
 
+static void _advance(struct mCoreThread* thread) {
+	struct GBASIORingThreadNode* node = _node(thread);
+	struct GBASIORingThreadCoordinator* coordinator = node->coordinator;
+	thread->impl->sync.deferWait = true;
+#ifdef ENABLE_DEBUGGERS
+	if (thread->core->debugger) mDebuggerRun(thread->core->debugger);
+	else
+#endif
+	thread->core->runLoop(thread->core);
+	thread->impl->sync.deferWait = false;
+	if (_time(node) > coordinator->clock) coordinator->clock = _time(node);
+	unsigned interval = _interval(coordinator);
+	if (interval != coordinator->interval) {
+		coordinator->interval = interval;
+		for (unsigned i = 0; i < coordinator->ring.count; ++i) {
+			struct GBASIORingThreadNode* peer = coordinator->nodes[i];
+			mTimingDeschedule(peer->thread->core->timing, &peer->quantum);
+			mTimingSchedule(peer->thread->core->timing, &peer->quantum, interval);
+		}
+	}
+}
+
+static bool _outputReady(struct mCoreThread* thread) {
+	struct mCoreSync* sync = &thread->impl->sync;
+	MutexLock(&sync->videoFrameMutex);
+	bool ready = !sync->videoFrameWait || !sync->videoFramePending;
+	MutexUnlock(&sync->videoFrameMutex);
+	if (!ready) return false;
+	MutexLock(&sync->audioBufferMutex);
+	ready = !sync->audioWait || !sync->audioHighWater ||
+	        mAudioBufferAvailable(thread->core->getAudioBuffer(thread->core)) < sync->audioHighWater;
+	MutexUnlock(&sync->audioBufferMutex);
+	return ready;
+}
+
 static void _run(struct mCoreThread* thread) {
 	struct GBASIORingThreadNode* node = _node(thread);
 	struct GBASIORingThreadCoordinator* coordinator = node->coordinator;
+	mCoreSyncWaitDeferred(&thread->impl->sync, thread->core->getAudioBuffer(thread->core));
 	MutexLock(&coordinator->mutex);
 	struct GBASIORingThreadNode* next = _next(coordinator);
-	bool ran = next == node;
-	if (next == node) {
-		thread->impl->sync.deferWait = true;
-#ifdef ENABLE_DEBUGGERS
-		if (thread->core->debugger) mDebuggerRun(thread->core->debugger);
-		else
-#endif
-		thread->core->runLoop(thread->core);
-		thread->impl->sync.deferWait = false;
-		if (_time(node) > coordinator->clock) coordinator->clock = _time(node);
-		unsigned interval = _interval(coordinator);
-		if (interval != coordinator->interval) {
-			coordinator->interval = interval;
-			for (unsigned i = 0; i < coordinator->ring.count; ++i) {
-				struct GBASIORingThreadNode* peer = coordinator->nodes[i];
-				mTimingDeschedule(peer->thread->core->timing, &peer->quantum);
-				mTimingSchedule(peer->thread->core->timing, &peer->quantum, interval);
-			}
-		}
+	/* Execute short serial slices cooperatively while the other owning
+	 * threads sleep on WAIT. Preserve the same timestamp ordering without
+	 * paying for a kernel thread handoff for each 32-bit cable word. */
+	for (unsigned slice = 0; next && slice < 64; ++slice) {
+		if (!_outputReady(next->thread)) break;
+		if (next == node) _advance(thread);
+		else if (!mCoreThreadRunWaiting(next->thread, _advance)) break;
 		next = _next(coordinator);
 	}
 	if (next != node) mCoreThreadWaitFromThread(thread);
@@ -78,7 +103,9 @@ static void _run(struct mCoreThread* thread) {
 	MutexUnlock(&coordinator->mutex);
 	/* Consumer waits must not hold the cable lock: the GUI may interrupt a
 	 * different participant while processing a reset, pause, or close. */
-	if (ran) mCoreSyncWaitDeferred(&thread->impl->sync, thread->core->getAudioBuffer(thread->core));
+	/* Only the output owner's thread may block on its consumers. GUI
+	 * interruption wakes that thread's sync conditions, never another core's. */
+	mCoreSyncWaitDeferred(&thread->impl->sync, thread->core->getAudioBuffer(thread->core));
 }
 
 static void _reset(struct mCoreThread* thread) {

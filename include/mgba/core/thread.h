@@ -90,6 +90,8 @@ struct mCoreThreadInternal {
 	Thread thread;
 	enum mCoreThreadState state;
 	bool rewinding;
+	bool borrowed;
+	bool waitingOnCondition;
 	int requested;
 
 	Mutex stateMutex;
@@ -126,6 +128,10 @@ void mCoreThreadTogglePause(struct mCoreThread* threadContext);
 void mCoreThreadPauseFromThread(struct mCoreThread* threadContext);
 void mCoreThreadWaitFromThread(struct mCoreThread* threadContext);
 void mCoreThreadStopWaiting(struct mCoreThread* threadContext);
+/* Execute a bounded callback for a core asleep on the adapter's WAIT request.
+ * Its owning thread and interrupt acknowledgements stay asleep until it returns.
+ * User pauses, resets, interrupts, and shutdowns cannot be borrowed. */
+bool mCoreThreadRunWaiting(struct mCoreThread* threadContext, ThreadCallback callback);
 
 bool mCoreThreadHasCrashed(struct mCoreThread* threadContext);
 void mCoreThreadMarkCrashed(struct mCoreThread* threadContext);

@@ -321,11 +321,13 @@ static THREAD_ENTRY _mCoreThreadRun(void* context) {
 		}
 
 		while (impl->state >= mTHREAD_MIN_WAITING && impl->state < mTHREAD_EXITING) {
+			while (impl->borrowed) ConditionWait(&impl->stateOnThreadCond, &impl->stateMutex);
 			if (impl->state == mTHREAD_INTERRUPTING) {
 				_changeState(impl, mTHREAD_INTERRUPTED);
 			}
 
 			while (impl->state >= mTHREAD_MIN_WAITING && impl->state <= mTHREAD_MAX_WAITING) {
+				impl->waitingOnCondition = true;
 #ifdef ENABLE_DEBUGGERS
 				if (debugger && debugger->state != DEBUGGER_SHUTDOWN) {
 					mDebuggerUpdate(debugger);
@@ -335,6 +337,8 @@ static THREAD_ENTRY _mCoreThreadRun(void* context) {
 				{
 					ConditionWait(&impl->stateOnThreadCond, &impl->stateMutex);
 				}
+				while (impl->borrowed) ConditionWait(&impl->stateOnThreadCond, &impl->stateMutex);
+				impl->waitingOnCondition = false;
 
 				if (impl->sync.audioWait) {
 					MutexUnlock(&impl->stateMutex);
@@ -725,6 +729,30 @@ void mCoreThreadStopWaiting(struct mCoreThread* threadContext) {
 	MutexLock(&threadContext->impl->stateMutex);
 	_cancelRequest(threadContext->impl, mTHREAD_REQ_WAIT);
 	MutexUnlock(&threadContext->impl->stateMutex);
+}
+
+bool mCoreThreadRunWaiting(struct mCoreThread* threadContext, ThreadCallback callback) {
+	struct mCoreThreadInternal* impl = threadContext->impl;
+	MutexLock(&impl->stateMutex);
+	if (!impl->waitingOnCondition || impl->state != mTHREAD_PAUSED || impl->requested != mTHREAD_REQ_WAIT || impl->borrowed || impl->interruptDepth) {
+		MutexUnlock(&impl->stateMutex);
+		return false;
+	}
+	impl->borrowed = true;
+	MutexUnlock(&impl->stateMutex);
+	struct mCoreThread* previous = mCoreThreadGet();
+	struct mLogger* logger = mLogGetThreadLogger();
+	ThreadLocalSetKey(_contextKey, threadContext);
+	mLogSetThreadLogger(&threadContext->logger.d);
+	callback(threadContext);
+	mLogSetThreadLogger(logger);
+	ThreadLocalSetKey(_contextKey, previous);
+	MutexLock(&impl->stateMutex);
+	impl->borrowed = false;
+	if (impl->state != mTHREAD_PAUSED || impl->requested != mTHREAD_REQ_WAIT)
+		ConditionWake(&impl->stateOnThreadCond);
+	MutexUnlock(&impl->stateMutex);
+	return true;
 }
 
 struct mCoreThread* mCoreThreadGet(void) {

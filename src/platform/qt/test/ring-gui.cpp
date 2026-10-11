@@ -164,6 +164,14 @@ private slots:
 				if (core->frameCounter(core) < 4300 || core->rawRead8(core, 0x0300361B, -1) != unsigned(players)) { entered = false; continue; }
 				QCOMPARE(core->rawRead8(core, 0x0300361C, -1), unsigned(i));
 				QVERIFY(core->rawRead16(core, 0x0300361E, -1) & (mode == "vs" ? 0x400 : 0x800));
+				// The stock opponent-marker switch used to produce a null cell
+				// for a fourth visible opponent and flood OAM with invalid shapes.
+				GBA* gba = static_cast<GBA*>(core->board);
+				for (unsigned object = 0; object < 128; ++object) {
+					uint16_t attr0 = gba->video.oam.raw[object * 4];
+					if ((attr0 & 0x300) == 0x200) continue;
+					QVERIFY2((attr0 >> 14) != 3, "Linked race contains a corrupted sprite shape");
+				}
 				for (int racer = 0; racer < players; ++racer) {
 					uint32_t driver = core->rawRead32(core, 0x03003638 + racer * 4, -1);
 					QVERIFY(driver >= 0x02000000 && driver < 0x03008000);
