@@ -27,8 +27,19 @@ Output is one JSON object; emulator errors go to stderr. `--watch ADDRESS`
 reads a 32-bit value from each console at the end. `--screens PREFIX` writes
 240x160 PPM snapshots. Stock ROM-specific menu diagnostics refer to the AMKE
 revision's known RAM layout; they are observational, not writes or assertions
-about a modified game's layout. Stock `transfers` is not instrumented and is
+about a modified game's layout. `game` reports its scene function, human count,
+local controller ID, mode flags, and racer positions. These fields are meaningful
+only in the corresponding stock scene; menu storage is released on race entry.
+Stock `transfers` is not instrumented and is
 reported as zero; only ring transfers have a counter.
+
+`test_stock.py` and `inputs/stock-{vs,battle}.csv` exercise the original
+four-player menus and gameplay. The test requires the original AMKE ROM and
+supplied BIOS hashes, checks all four local IDs and independent held keys, and
+compares the four racer positions across consoles. Run it with `--runner`,
+`--rom`, `--bios`, and `--results`, as for `test_ring.py`. The fixture includes
+BIOS startup and staggered character confirmation. It verifies gameplay entry
+and synchronized positions, not completion of a race or every Battle rule.
 
 `--expect-poc` fails unless the standalone ring homebrew reports correct IDs,
 counts, >=100 commits, and zero errors/timeouts; it also rejects missed
