@@ -3,8 +3,12 @@
 Enable `BUILD_TEST=ON`, `BUILD_HEADLESS=ON`, and `BUILD_SUITE=ON` in CMake.
 `mgba-link` uses the existing core and stock lockstep driver for 2–4 consoles;
 `--ring` uses the independent normal-serial ring driver for 2–8 consoles.
-A valid 16 KiB external BIOS is mandatory. BIOS boot is enabled; HLE fallback is
-not used by the test runner.
+A valid 16 KiB external BIOS and BIOS boot are the default validation path.
+Pass either `--bios FILE` or `--hle`; the latter explicitly exercises mGBA's
+built-in BIOS implementation without loading an external BIOS. The runner
+checks the selected mode after reset and reports `bios: real` or `bios: hle`
+in JSON. Unsupported BIOS calls fail the run. CpuSet alignment diagnostics
+remain informational because the BIOS implementation still executes the call.
 
 ```sh
 source /workspace/.setup/activate.sh
