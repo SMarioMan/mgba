@@ -21,6 +21,7 @@ static void _changeVideoSync(struct mCoreSync* sync, bool wait) {
 }
 
 void mCoreSyncLoadCoreOpts(struct mCoreSync* sync, const struct mCoreOptions* opts) {
+	sync->deferWait = false;
 	sync->audioWait = opts->audioSync;
 	sync->videoFrameWait = opts->videoSync;
 	if (opts->fpsTarget) {
@@ -40,10 +41,10 @@ void mCoreSyncPostFrame(struct mCoreSync* sync) {
 	++sync->videoFramePending;
 	do {
 		ConditionWake(&sync->videoFrameAvailableCond);
-		if (sync->videoFrameWait) {
+		if (sync->videoFrameWait && !sync->deferWait) {
 			ConditionWait(&sync->videoFrameRequiredCond, &sync->videoFrameMutex);
 		}
-	} while (sync->videoFrameWait && sync->videoFramePending);
+	} while (sync->videoFrameWait && !sync->deferWait && sync->videoFramePending);
 	MutexUnlock(&sync->videoFrameMutex);
 }
 
@@ -66,7 +67,9 @@ bool mCoreSyncWaitFrameStart(struct mCoreSync* sync) {
 	if (!sync->videoFrameWait && !sync->videoFramePending) {
 		return false;
 	}
-	if (sync->videoFrameWait) {
+	/* A queued GUI consumer may already have a frame. Waiting for another
+	 * notification here can strand a serialized producer with its peer asleep. */
+	if (sync->videoFrameWait && !sync->videoFramePending) {
 		ConditionWake(&sync->videoFrameRequiredCond);
 		if (ConditionWaitTimed(&sync->videoFrameAvailableCond, &sync->videoFrameMutex, 50)) {
 			return false;
@@ -100,7 +103,7 @@ bool mCoreSyncProduceAudio(struct mCoreSync* sync, const struct mAudioBuffer* bu
 
 	size_t produced = mAudioBufferCapacity(buf);
 	size_t producedNew = mAudioBufferAvailable(buf);
-	while (sync->audioWait && sync->audioHighWater && producedNew >= sync->audioHighWater) {
+	while (sync->audioWait && !sync->deferWait && sync->audioHighWater && producedNew >= sync->audioHighWater) {
 		ConditionWait(&sync->audioRequiredCond, &sync->audioBufferMutex);
 		produced = producedNew;
 		producedNew = mAudioBufferAvailable(buf);
@@ -132,4 +135,15 @@ void mCoreSyncConsumeAudio(struct mCoreSync* sync) {
 
 	ConditionWake(&sync->audioRequiredCond);
 	MutexUnlock(&sync->audioBufferMutex);
+}
+
+void mCoreSyncWaitDeferred(struct mCoreSync* sync, const struct mAudioBuffer* buffer) {
+	MutexLock(&sync->videoFrameMutex);
+	while (sync->videoFrameWait && sync->videoFramePending) {
+		ConditionWake(&sync->videoFrameAvailableCond);
+		ConditionWait(&sync->videoFrameRequiredCond, &sync->videoFrameMutex);
+	}
+	MutexUnlock(&sync->videoFrameMutex);
+	mCoreSyncLockAudio(sync);
+	mCoreSyncProduceAudio(sync, buffer);
 }

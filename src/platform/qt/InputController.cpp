@@ -583,13 +583,13 @@ bool InputController::hasPendingEvent(int key) const {
 }
 
 int InputController::claimPlayer() {
-	for (int i = 0; i < MAX_GBAS; ++i) {
+	for (int i = 0; i < MAX_LOCAL_PLAYERS; ++i) {
 		if (!(s_claimedPlayers & (1 << i))) {
 			s_claimedPlayers |= 1 << i;
 			return i;
 		}
 	}
-	qFatal("Can't claim 5th player. Please report this bug.");
+	qFatal("Can't claim another input player (limit %d). Please report this bug.", MAX_LOCAL_PLAYERS);
 }
 
 void InputController::freePlayer(int player) {

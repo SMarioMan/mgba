@@ -79,6 +79,7 @@ public:
 	QString invokeOnExit() { return m_invokeOnExit; }
 
 	void initMultiplayer();
+	MultiplayerController* multiplayer() { return &m_multiplayer; }
 
 public slots:
 	void restartForUpdate();

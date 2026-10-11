@@ -38,6 +38,7 @@ set(SOURCE_FILES
 set(SIO_FILES
 	sio/dolphin.c
 	sio/ring.c
+	sio/ring-thread.c
 	sio/lockstep.c)
 
 set(EXTRA_FILES

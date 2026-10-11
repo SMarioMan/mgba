@@ -263,7 +263,11 @@ static THREAD_ENTRY _mCoreThreadRun(void* context) {
 	}
 #endif
 
-	core->reset(core);
+	if (threadContext->resetOverride) {
+		threadContext->resetOverride(threadContext);
+	} else {
+		core->reset(core);
+	}
 	threadContext->impl->core = core;
 	MutexLock(&threadContext->impl->stateMutex);
 	_changeState(threadContext->impl, mTHREAD_RUNNING);
@@ -292,7 +296,11 @@ static THREAD_ENTRY _mCoreThreadRun(void* context) {
 		if (debugger) {
 			while (impl->state == mTHREAD_RUNNING) {
 				MutexUnlock(&impl->stateMutex);
-				mDebuggerRun(debugger);
+				if (threadContext->runLoopOverride) {
+					threadContext->runLoopOverride(threadContext);
+				} else {
+					mDebuggerRun(debugger);
+				}
 				MutexLock(&impl->stateMutex);
 				if (debugger->state == DEBUGGER_SHUTDOWN) {
 					_changeState(impl, mTHREAD_EXITING);
@@ -303,7 +311,11 @@ static THREAD_ENTRY _mCoreThreadRun(void* context) {
 		{
 			while (impl->state == mTHREAD_RUNNING) {
 				MutexUnlock(&impl->stateMutex);
-				core->runLoop(core);
+				if (threadContext->runLoopOverride) {
+					threadContext->runLoopOverride(threadContext);
+				} else {
+					core->runLoop(core);
+				}
 				MutexLock(&impl->stateMutex);
 			}
 		}
@@ -376,7 +388,11 @@ static THREAD_ENTRY _mCoreThreadRun(void* context) {
 			}
 		}
 		if (pendingRequests & mTHREAD_REQ_RESET) {
-			core->reset(core);
+			if (threadContext->resetOverride) {
+				threadContext->resetOverride(threadContext);
+			} else {
+				core->reset(core);
+			}
 			if (threadContext->resetCallback) {
 				threadContext->resetCallback(threadContext);
 			}

@@ -14,12 +14,14 @@
 #include <mgba/core/lockstep.h>
 #ifdef M_CORE_GBA
 #include <mgba/internal/gba/sio/lockstep.h>
+#include <mgba/internal/gba/sio/ring-thread.h>
 #endif
 #ifdef M_CORE_GB
 #include <mgba/internal/gb/sio/lockstep.h>
 #endif
 
 #include <memory>
+#include <mutex>
 
 struct GBSIOLockstepNode;
 struct GBASIOLockstepNode;
@@ -41,15 +43,20 @@ public:
 	int attached();
 	int playerId(CoreController*) const;
 	int saveId(CoreController*) const;
+	bool setRingTopology(bool ring);
+	bool ringTopology() const { return m_ringTopology; }
+	int maxPlayers() const { return m_ringTopology ? 8 : 4; }
 
 signals:
 	void gameAttached();
 	void gameDetached();
+	void topologyChanged();
 
 private:
 	union Node {
 		GBSIOLockstepNode* gb;
 		GBASIOLockstepDriver* gba;
+		GBASIORingThreadNode* ring;
 	};
 	struct Player {
 		Player(CoreController* controller);
@@ -65,6 +72,7 @@ private:
 		int saveId = 1;
 		int preferredId = 0;
 		bool attached = false;
+		bool ring = false;
 	};
 	struct LockstepUser : mLockstepThreadUser {
 		MultiplayerController* controller;
@@ -84,7 +92,9 @@ private:
 
 #ifdef M_CORE_GBA
 	GBASIOLockstepCoordinator m_gbaCoordinator;
+	GBASIORingThreadCoordinator m_ringCoordinator;
 #endif
+	bool m_ringTopology = false;
 
 	mPlatform m_platform = mPLATFORM_NONE;
 	int m_nextPid = 0;
@@ -92,6 +102,7 @@ private:
 	QHash<int, Player> m_pids;
 	QList<int> m_players;
 	QMutex m_lock;
+	mutable std::recursive_mutex m_lifecycle;
 	QHash<QPair<QString, QString>, int> m_claimedSaves;
 };
 

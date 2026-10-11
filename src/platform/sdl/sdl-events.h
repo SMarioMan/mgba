@@ -21,7 +21,8 @@ mLOG_DECLARE_CATEGORY(SDL_EVENTS);
 #define SDL_BINDING_BUTTON 0x53444C42U
 #define SDL_BINDING_CONTROLLER 0x53444C43U
 
-#define MAX_PLAYERS 4
+/* Local controller capacity, independent of GBA hardware link slots. */
+#define MAX_PLAYERS 8
 
 struct Configuration;
 

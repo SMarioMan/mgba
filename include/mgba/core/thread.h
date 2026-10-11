@@ -40,6 +40,10 @@ struct mCoreThread {
 	ThreadCallback sleepCallback;
 	ThreadCallback pauseCallback;
 	ThreadCallback unpauseCallback;
+	/* Optional execution adapters. They must execute one bounded run-loop
+	 * iteration/reset and preserve the core's normal debugger behavior. */
+	ThreadCallback runLoopOverride;
+	ThreadCallback resetOverride;
 	void* userData;
 	void (*run)(struct mCoreThread*);
 
