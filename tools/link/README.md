@@ -1,5 +1,7 @@
 # Deterministic GBA link runner
 
+For local Qt windows, see [GUI ring linking](GUI.md).
+
 Enable `BUILD_TEST=ON`, `BUILD_HEADLESS=ON`, and `BUILD_SUITE=ON` in CMake.
 `mgba-link` uses the existing core and stock lockstep driver for 2–4 consoles;
 `--ring` uses the independent normal-serial ring driver for 2–8 consoles.

@@ -71,6 +71,10 @@ GBAApp::GBAApp(int& argc, char* argv[], ConfigController* config)
 
 	m_manager.setConfig(m_configController->config());
 	m_manager.setMultiplayerController(&m_multiplayer);
+	m_multiplayer.setRingTopology(m_configController->getQtOption("gbaLinkTopology").toString() == QLatin1String("ring"));
+	connect(&m_multiplayer, &MultiplayerController::topologyChanged, this, [this]() {
+		for (Window* window : m_windows) window->updateMultiplayerStatus(m_windows.count() < m_multiplayer.maxPlayers());
+	});
 
 	if (!m_configController->getQtOption("audioDriver").isNull()) {
 		AudioProcessor::setDriver(static_cast<AudioProcessor::Driver>(m_configController->getQtOption("audioDriver").toInt()));
@@ -132,14 +136,14 @@ bool GBAApp::event(QEvent* event) {
 }
 
 Window* GBAApp::newWindow() {
-	if (m_windows.count() >= MAX_GBAS) {
+	if (m_windows.count() >= m_multiplayer.maxPlayers()) {
 		return nullptr;
 	}
 	Window* w = new Window(&m_manager, m_configController, m_windows.count());
 	connect(w, &Window::destroyed, [this, w]() {
 		m_windows.removeAll(w);
 		for (Window* w : m_windows) {
-			w->updateMultiplayerStatus(m_windows.count() < MAX_GBAS);
+			w->updateMultiplayerStatus(m_windows.count() < m_multiplayer.maxPlayers());
 		}
 	});
 	m_windows.append(w);
@@ -148,7 +152,7 @@ Window* GBAApp::newWindow() {
 	w->show();
 	w->multiplayerChanged();
 	for (Window* w : m_windows) {
-		w->updateMultiplayerStatus(m_windows.count() < MAX_GBAS);
+		w->updateMultiplayerStatus(m_windows.count() < m_multiplayer.maxPlayers());
 	}
 	return w;
 }

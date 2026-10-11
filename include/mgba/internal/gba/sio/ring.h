@@ -29,6 +29,8 @@ struct GBASIORingDriver {
 	struct GBASIORing* ring;
 	struct mTimingEvent event;
 	unsigned slot;
+	/* Align independently booted GUI cores on the shared cable clock. */
+	int64_t timeOffset;
 	uint32_t incoming;
 	enum GBASIOMode transferMode;
 	bool idleSo;

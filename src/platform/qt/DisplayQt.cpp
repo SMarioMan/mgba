@@ -88,6 +88,12 @@ void DisplayQt::setMaximumScale(int scale) {
 }
 
 void DisplayQt::framePosted() {
+	// The software renderer consumes the frame on the GUI thread, just like
+	// the GL renderer does on its drawing thread. Release producers waiting
+	// for video synchronization after accepting the posted frame.
+	struct mCoreSync* sync = &m_context->thread()->impl->sync;
+	mCoreSyncWaitFrameStart(sync);
+	mCoreSyncWaitFrameEnd(sync);
 	update();
 	const mColor* buffer = m_context->drawContext();
 	if (const_cast<const QImage&>(m_layers[VIDEO_LAYER_IMAGE]).bits() == reinterpret_cast<const uchar*>(buffer)) {

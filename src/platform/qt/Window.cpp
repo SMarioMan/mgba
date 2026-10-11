@@ -7,6 +7,7 @@
 
 #include <QKeyEvent>
 #include <QKeySequence>
+#include <QInputDialog>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
@@ -1472,6 +1473,19 @@ void Window::setupMenu(QMenuBar* menubar) {
 
 	m_actions.addSeparator("file");
 	m_multiWindow = m_actions.addAction(tr("New multiplayer window"), "multiWindow", GBAApp::app(), &GBAApp::newWindow, "file");
+	m_actions.addAction(tr("GBA link topology..."), "gbaLinkTopology", [this]() {
+		MultiplayerController* multiplayer = GBAApp::app()->multiplayer();
+		const QStringList topologies{tr("Standard link (up to 4 players)"), tr("Ring link (up to 8 players)")};
+		bool accepted = false;
+		QString selected = QInputDialog::getItem(this, tr("GBA link topology"), tr("Connect multiplayer windows using:"), topologies, multiplayer->ringTopology() ? 1 : 0, false, &accepted);
+		if (!accepted) return;
+		bool ring = selected == topologies[1];
+		if ((!ring && GBAApp::app()->windows().size() > MAX_GBAS) || !multiplayer->setRingTopology(ring)) {
+			QMessageBox::information(this, tr("GBA link topology"), tr("Close extra multiplayer windows before selecting standard link, and close Game Boy games before selecting a GBA topology."));
+			return;
+		}
+		m_config->setQtOption("gbaLinkTopology", ring ? "ring" : "standard");
+	}, "file");
 
 #ifdef M_CORE_GBA
 	auto dolphin = m_actions.addAction(tr("Connect to Dolphin..."), "connectDolphin", openNamedTView<DolphinConnector>(&m_dolphinView, true, this), "file");
@@ -1500,7 +1514,17 @@ void Window::setupMenu(QMenuBar* menubar) {
 
 	auto pause = m_actions.addBooleanAction(tr("&Pause"), "pause", [this](bool paused) {
 		if (m_controller) {
-			m_controller->setPaused(paused);
+			if (GBAApp::app()->multiplayer()->ringTopology()) {
+				// Linked windows can have different video phases. Waiting for each
+				// next frame would strand a later frame behind a paused cable peer.
+				for (Window* window : GBAApp::app()->windows()) {
+					if (!window->controller()) continue;
+					if (paused && window->controller()->hasStarted()) mCoreThreadPause(window->controller()->thread());
+					else window->controller()->setPaused(paused);
+				}
+			} else {
+				m_controller->setPaused(paused);
+			}
 		} else {
 			m_pendingPause = paused;
 		}

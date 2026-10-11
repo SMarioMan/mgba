@@ -77,7 +77,7 @@ static uint16_t _write(struct GBASIODriver* d, uint16_t value) {
 			outgoing[i] = sio->p->memory.io[GBA_REG(SIODATA8)] & 0xFF;
 		}
 	}
-	uint64_t finish = mTimingGlobalTime(&d->p->p->timing) + GBASIOTransferCycles(d->p->mode, value, 1);
+	int64_t finish = mTimingGlobalTime(&d->p->p->timing) + p->timeOffset + GBASIOTransferCycles(d->p->mode, value, 1);
 	++ring->transfers;
 	for (unsigned i = 0; i < ring->count; ++i) {
 		if (!receiving[i]) {
@@ -89,7 +89,7 @@ static uint16_t _write(struct GBASIODriver* d, uint16_t value) {
 		receiver->active = true;
 		++ring->pending;
 		struct mTiming* timing = &receiver->d.p->p->timing;
-		int64_t delay = (int64_t) finish - (int64_t) mTimingGlobalTime(timing);
+		int64_t delay = finish - ((int64_t) mTimingGlobalTime(timing) + receiver->timeOffset);
 		mTimingSchedule(timing, &receiver->event, delay > 0 ? (int32_t) delay : 0);
 	}
 	return value;

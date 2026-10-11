@@ -30,6 +30,7 @@ int MultiplayerController::Player::id() const {
 	switch (controller->platform()) {
 #ifdef M_CORE_GBA
 	case mPLATFORM_GBA: {
+		if (ring) return node.ring->driver.slot;
 		int id = node.gba->d.deviceId(&node.gba->d);
 		if (id >= 0) {
 			return id;
@@ -53,6 +54,9 @@ bool MultiplayerController::Player::operator<(const MultiplayerController::Playe
 }
 
 MultiplayerController::MultiplayerController() {
+#ifdef M_CORE_GBA
+	GBASIORingThreadInit(&m_ringCoordinator);
+#endif
 	mLockstepInit(&m_lockstep);
 	m_lockstep.context = this;
 	m_lockstep.lock = [](mLockstep* lockstep) {
@@ -192,6 +196,9 @@ MultiplayerController::MultiplayerController() {
 }
 
 MultiplayerController::~MultiplayerController() {
+#ifdef M_CORE_GBA
+	GBASIORingThreadDeinit(&m_ringCoordinator);
+#endif
 	mLockstepDeinit(&m_lockstep);
 	if (m_platform == mPLATFORM_GBA) {
 		GBASIOLockstepCoordinatorDeinit(&m_gbaCoordinator);
@@ -199,6 +206,7 @@ MultiplayerController::~MultiplayerController() {
 }
 
 bool MultiplayerController::attachGame(CoreController* controller) {
+	std::lock_guard<std::recursive_mutex> lifecycle(m_lifecycle);
 	QList<CoreController::Interrupter> interrupters;
 	interrupters.append(controller);
 	for (Player& p : m_pids.values()) {
@@ -230,9 +238,10 @@ bool MultiplayerController::attachGame(CoreController* controller) {
 	if (!thread) {
 		return false;
 	}
+	if (m_pids.size() >= (m_platform == mPLATFORM_GBA ? maxPlayers() : 2)) return false;
 
 	Player player{controller};
-	for (int i = 0; i < MAX_GBAS; ++i) {
+	for (int i = 0; i < maxPlayers(); ++i) {
 		if (m_claimedIds & (1 << i)) {
 			continue;
 		}
@@ -243,8 +252,16 @@ bool MultiplayerController::attachGame(CoreController* controller) {
 	switch (controller->platform()) {
 #ifdef M_CORE_GBA
 	case mPLATFORM_GBA: {
-		if (attached() >= MAX_GBAS) {
-			return false;
+		if (m_ringTopology) {
+			player.node.ring = new GBASIORingThreadNode;
+			if (!GBASIORingThreadAttach(&m_ringCoordinator, player.node.ring, thread)) {
+				delete player.node.ring;
+				m_claimedIds &= ~(1 << player.preferredId);
+				return false;
+			}
+			player.ring = true;
+			player.attached = true;
+			break;
 		}
 
 		GBASIOLockstepDriver* node = new GBASIOLockstepDriver;
@@ -303,7 +320,7 @@ bool MultiplayerController::attachGame(CoreController* controller) {
 
 	if (claimed) {
 		player.saveId = 0;
-		for (int i = 0; i < MAX_GBAS; ++i) {
+		for (int i = 0; i < maxPlayers(); ++i) {
 			if (claimed & (1 << i)) {
 				continue;
 			}
@@ -343,6 +360,7 @@ bool MultiplayerController::attachGame(CoreController* controller) {
 }
 
 void MultiplayerController::detachGame(CoreController* controller) {
+	std::lock_guard<std::recursive_mutex> lifecycle(m_lifecycle);
 	if (m_players.empty()) {
 		return;
 	}
@@ -373,6 +391,11 @@ void MultiplayerController::detachGame(CoreController* controller) {
 	case mPLATFORM_GBA: {
 		GBA* gba = static_cast<GBA*>(thread->core->board);
 		Player& p = m_pids.find(pid).value();
+		if (p.ring) {
+			GBASIORingThreadDetach(p.node.ring);
+			delete p.node.ring;
+			break;
+		}
 		GBASIODriver* node = gba->sio.driver;
 		if (node == &p.node.gba->d) {
 			thread->core->setPeripheral(thread->core, mPERIPH_GBA_LINK_PORT, NULL);
@@ -421,6 +444,7 @@ void MultiplayerController::detachGame(CoreController* controller) {
 
 	m_pids.remove(pid);
 	if (m_pids.size() == 0) {
+		m_players.clear();
 		if (m_platform == mPLATFORM_GBA) {
 			GBASIOLockstepCoordinatorDeinit(&m_gbaCoordinator);
 		}
@@ -432,6 +456,7 @@ void MultiplayerController::detachGame(CoreController* controller) {
 }
 
 int MultiplayerController::playerId(CoreController* controller) const {
+	std::lock_guard<std::recursive_mutex> lifecycle(m_lifecycle);
 	for (int i = 0; i < m_players.count(); ++i) {
 		const Player* p = player(i);
 		if (!p) {
@@ -446,6 +471,7 @@ int MultiplayerController::playerId(CoreController* controller) const {
 }
 
 int MultiplayerController::saveId(CoreController* controller) const {
+	std::lock_guard<std::recursive_mutex> lifecycle(m_lifecycle);
 	for (int i = 0; i < m_players.count(); ++i) {
 		const Player* p = player(i);
 		if (!p) {
@@ -460,18 +486,39 @@ int MultiplayerController::saveId(CoreController* controller) const {
 }
 
 int MultiplayerController::attached() {
+	std::lock_guard<std::recursive_mutex> lifecycle(m_lifecycle);
 	int num = 0;
 	switch (m_platform) {
 	case mPLATFORM_GB:
 		num = m_lockstep.attached;
 		break;
 	case mPLATFORM_GBA:
-		num = saturateCast<int>(GBASIOLockstepCoordinatorAttached(&m_gbaCoordinator));
+		num = m_ringTopology ? m_ringCoordinator.ring.count : saturateCast<int>(GBASIOLockstepCoordinatorAttached(&m_gbaCoordinator));
 		break;
 	default:
 		break;
 	}
 	return num;
+}
+
+bool MultiplayerController::setRingTopology(bool ring) {
+	std::lock_guard<std::recursive_mutex> lifecycle(m_lifecycle);
+	if (ring == m_ringTopology) return true;
+	if ((m_platform != mPLATFORM_NONE && m_platform != mPLATFORM_GBA) || (!ring && m_pids.size() > MAX_GBAS)) return false;
+	QList<CoreController::Interrupter> interrupters;
+	QList<CoreController*> controllers;
+	for (int pid : m_players) {
+		CoreController* core = m_pids.find(pid).value().controller;
+		controllers.append(core);
+		interrupters.append(core);
+	}
+	for (CoreController* core : controllers) detachGame(core);
+	m_ringTopology = ring;
+	for (CoreController* core : controllers) {
+		if (!attachGame(core)) return false;
+	}
+	emit topologyChanged();
+	return true;
 }
 
 MultiplayerController::Player* MultiplayerController::player(int id) {
