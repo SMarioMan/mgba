@@ -120,7 +120,7 @@ void SDLInputDriver::loadConfiguration(ConfigController* config) {
 	m_config = config;
 
 	QWriteLocker locker(&s_eventsRwLock);
-	mSDLEventsLoadConfig(&s_sdlEvents, config->input());
+	mSDLEventsLoadPlayerConfig(&s_sdlEvents, config->input(), playerId());
 	if (!m_playerAttached) {
 		m_playerAttached = mSDLAttachPlayer(&s_sdlEvents, &m_sdlPlayer, playerId());
 	}

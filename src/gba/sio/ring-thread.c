@@ -10,6 +10,13 @@
 
 #define RING_IDLE_QUANTUM 16384
 
+static int64_t _resetEpoch(struct GBASIORingThreadCoordinator* coordinator) {
+	/* A new console may open while other windows are already executing.
+	 * Choose a future frame boundary for its reset timestamp, keeping LCD
+	 * phases aligned without changing the physical serial clock or CPU rate. */
+	return ((coordinator->clock + VIDEO_TOTAL_LENGTH - 1) / VIDEO_TOTAL_LENGTH) * VIDEO_TOTAL_LENGTH;
+}
+
 static unsigned _interval(struct GBASIORingThreadCoordinator* coordinator) {
 	unsigned interval = RING_IDLE_QUANTUM;
 	for (unsigned i = 0; i < coordinator->ring.count; ++i) {
@@ -113,7 +120,7 @@ static void _reset(struct mCoreThread* thread) {
 	struct GBASIORingThreadCoordinator* coordinator = node->coordinator;
 	MutexLock(&coordinator->mutex);
 	thread->core->reset(thread->core);
-	node->driver.timeOffset = coordinator->clock - mTimingGlobalTime(thread->core->timing);
+	node->driver.timeOffset = _resetEpoch(coordinator) - mTimingGlobalTime(thread->core->timing);
 	mTimingSchedule(thread->core->timing, &node->quantum, coordinator->interval);
 	MutexUnlock(&coordinator->mutex);
 }
@@ -146,7 +153,7 @@ bool GBASIORingThreadAttach(struct GBASIORingThreadCoordinator* coordinator, str
 		node->thread = thread;
 		node->coordinator = coordinator;
 		coordinator->nodes[node->driver.slot] = node;
-		node->driver.timeOffset = coordinator->clock - mTimingGlobalTime(thread->core->timing);
+		node->driver.timeOffset = _resetEpoch(coordinator) - mTimingGlobalTime(thread->core->timing);
 		node->quantum.context = node;
 		node->quantum.callback = _yield;
 		node->quantum.name = "GUI ring scheduling quantum";

@@ -9,6 +9,11 @@
 #include <QAction>
 #include <QComboBox>
 #include <QFile>
+#include <QMenuBar>
+#include <QDir>
+#include <mgba/core/input.h>
+#include <mgba/gba/interface.h>
+#include <mgba/internal/gba/input.h>
 #include <QInputDialog>
 #include <QTimer>
 #include <QTemporaryDir>
@@ -26,16 +31,48 @@ struct Inputs {
 	int next = 0;
 	unsigned held = 0;
     bool breakWire = false;
+    Window* keyboardWindow = nullptr;
+    unsigned firstSimulation = 0, lastSimulation = 0, speedStartFrame = 0;
+    unsigned minSpeedFrame = 0;
+    bool measureSpeed = false, deferMotion = false, speedComplete = false;
 	static void frame(void* context) {
 		Inputs* inputs = static_cast<Inputs*>(context);
 		mCore* core = inputs->controller->thread()->core;
 		unsigned frame = core->frameCounter(core);
+        unsigned simulation = core->rawRead32(core, 0x03002E30, -1);
+        bool racing = core->rawRead8(core, 0x03006BB5, -1) && simulation >= 128;
+        if (inputs->measureSpeed && !inputs->speedComplete && racing && frame >= inputs->minSpeedFrame) {
+            if (!inputs->speedStartFrame) {
+                inputs->speedStartFrame = frame;
+                inputs->firstSimulation = simulation;
+            } else if (frame >= inputs->speedStartFrame + 600) {
+                inputs->lastSimulation = simulation;
+                inputs->speedComplete = true;
+            }
+        }
         if (inputs->breakWire && frame >= 2600) {
             auto driver = reinterpret_cast<GBASIORingDriver*>(static_cast<GBA*>(core->board)->sio.driver);
             driver->ring->openInputs = frame < 2900 ? 1U << 4 : 0;
         }
 		while (inputs->next < inputs->events.size() && inputs->events[inputs->next].first <= frame) {
+            // Keep Battle stationary through the speed window; an eliminated
+            // round's frozen counter must never be mistaken for half-speed.
+            if (inputs->deferMotion && !inputs->speedComplete && inputs->events[inputs->next].first >= 3500) break;
 			unsigned keys = inputs->events[inputs->next++].second;
+            if (inputs->keyboardWindow) {
+                unsigned previous = inputs->held;
+                Window* window = inputs->keyboardWindow;
+                QMetaObject::invokeMethod(window, [window, keys, previous]() {
+                    const int keymap[10] = {Qt::Key_X, Qt::Key_Z, Qt::Key_Backspace, Qt::Key_Return,
+                        Qt::Key_Right, Qt::Key_Left, Qt::Key_Up, Qt::Key_Down, Qt::Key_S, Qt::Key_A};
+                    for (int i = 0; i < 10; ++i) {
+                        if ((keys & (1U << i)) && !(previous & (1U << i))) QTest::keyPress(window, Qt::Key(keymap[i]));
+                        if (!(keys & (1U << i)) && (previous & (1U << i))) QTest::keyRelease(window, Qt::Key(keymap[i]));
+                    }
+                }, Qt::QueuedConnection);
+                inputs->held = keys;
+                continue;
+            }
 			for (int key = 0; key < 10; ++key) {
 				if ((keys & (1U << key)) && !(inputs->held & (1U << key))) inputs->controller->addKey(key);
 				if (!(keys & (1U << key)) && (inputs->held & (1U << key))) inputs->controller->clearKey(key);
@@ -111,6 +148,107 @@ private slots:
             QVERIFY(borrowed);
             QVERIFY2(!premature, "GUI interruption returned before the borrowed failure callback finished");
         }
+    }
+    void scriptedLaunch() {
+        auto app = GBAApp::app();
+        app->setQuitOnLastWindowClosed(false);
+        QTemporaryDir settings;
+        QString rom = qEnvironmentVariable("MGBA_RING_GUI_BOOT_ROM");
+        if (rom.isEmpty()) QSKIP("Set MGBA_RING_GUI_BOOT_ROM to a --boot-ring ROM");
+        QByteArray directory = settings.path().toUtf8(), romArg = rom.toUtf8();
+        char arg0[] = "mgba-qt", flag[] = "--ring-players", count[] = "8";
+        char profile[] = "--instance-settings", hidden[] = "--hide-menu", biosFlag[] = "-b";
+        QByteArray bios = qEnvironmentVariable("MGBA_RING_GUI_BIOS").toUtf8();
+        config->setOption("gba.bios", "");
+        char* argv[] = {arg0, flag, count, profile, directory.data(), hidden, biosFlag, bios.data(), romArg.data()};
+        QVERIFY(config->parseArguments(9, argv));
+        QVERIFY(app->multiplayer()->setRingTopology(true));
+        QVERIFY(app->newWindow());
+        app->initMultiplayer();
+        QCOMPARE(app->windows().size(), 8);
+        QFile fixture(qEnvironmentVariable("MGBA_RING_GUI_INPUTS") + "/vs-8.csv");
+        QVERIFY(fixture.open(QIODevice::ReadOnly));
+        for (Inputs& input : inputs) input = {};
+        while (!fixture.atEnd()) {
+            auto fields = fixture.readLine().trimmed().split(',');
+            if (fields.size() != 3) continue;
+            unsigned frame = fields[0].toUInt(), slot = fields[1].toUInt();
+            if (frame < 1500) continue; // This ROM boots directly into Ring Link.
+            inputs[slot].events.append(qMakePair(frame >= 2000 ? frame + 600 : frame, fields[2].toUInt(nullptr,16)));
+        }
+        // Cycle Mario through DK -> Wario -> Bowser and around twice via real
+        // Qt key events, then return to Mario before the normal ready press.
+        for (unsigned j = 0; j < 16; ++j) {
+            inputs[0].events.append(qMakePair(1850U + 30*j, 16U));
+            inputs[0].events.append(qMakePair(1865U + 30*j, 0U));
+        }
+        std::sort(inputs[0].events.begin(), inputs[0].events.end());
+        auto windows = app->windows();
+        for (int i = 0; i < 8; ++i) {
+            Window* window = windows[i];
+            auto controller = window->controller();
+            QVERIFY(controller);
+            QCOMPARE(window->config()->getOption("bios"), QString::fromUtf8(bios));
+            QTRY_VERIFY_WITH_TIMEOUT(controller->hasStarted(), 10000);
+            QVERIFY(window->windowTitle().endsWith(QString(" - P%1").arg(i+1)));
+            QVERIFY(!window->menuBar()->isVisible());
+            inputs[i].controller = controller.get();
+            inputs[i].measureSpeed = true;
+            inputs[i].minSpeedFrame = 4300;
+            if (!i) inputs[i].keyboardWindow = window;
+            mCoreCallbacks callbacks{};
+            callbacks.context = &inputs[i]; callbacks.videoFrameStarted = Inputs::frame;
+            CoreController::Interrupter interrupter(controller.get());
+            controller->thread()->core->addCoreCallbacks(controller->thread()->core, &callbacks);
+        }
+        // Alt reveals the menu in a window, without entering fullscreen.
+        QTest::keyClick(windows[0], Qt::Key_Alt);
+        QVERIFY(windows[0]->menuBar()->isVisible());
+        windows[0]->showMenu(false);
+        QElapsedTimer timer; timer.start();
+        bool finished = false;
+        while (!finished && timer.elapsed() < 600000) {
+            QTest::qWait(50);
+            finished = true;
+            for (Window* w : windows) {
+                QVERIFY(!mCoreThreadHasCrashed(w->controller()->thread()));
+                QVERIFY(!mCoreThreadHasExited(w->controller()->thread()));
+                if (w->controller()->frameCounter() < 5100) finished = false;
+            }
+        }
+        QVERIFY(finished);
+        for (int i = 0; i < 8; ++i) {
+            auto controller = windows[i]->controller();
+            CoreController::Interrupter interrupter(controller.get());
+            auto core = controller->thread()->core;
+            QVERIFY(static_cast<GBA*>(core->board)->biosVf);
+            QCOMPARE(core->rawRead8(core, 0x0300361B, -1), 8U);
+            QCOMPARE(core->rawRead32(core, 0x03006B98, -1), 0U);
+            QCOMPARE(core->rawRead32(core, 0x03006B9C, -1), 0U);
+            QVERIFY(inputs[i].speedComplete);
+            double rate = double(inputs[i].lastSimulation - inputs[i].firstSimulation) / 600;
+            qInfo("Scripted P%d speed %.3f native updates/video frame", i+1, rate);
+            QVERIFY(rate >= 0.95);
+            // Independently persist each keyboard map, then load it afresh.
+            mInputBindKey(windows[i]->inputController()->map(), InputController::KEYBOARD, Qt::Key_F1+i, GBA_KEY_A);
+            windows[i]->inputController()->saveConfiguration(InputController::KEYBOARD);
+            ConfigController reloaded(nullptr, QDir(settings.path()).filePath(QString("P%1").arg(i+1)));
+            mInputMap map; mInputMapInit(&map, &GBAInputInfo);
+            QVERIFY(mInputMapLoad(&map, InputController::KEYBOARD, reloaded.input()));
+            QCOMPARE(mInputMapKey(&map, InputController::KEYBOARD, Qt::Key_F1+i), int(GBA_KEY_A));
+            if (i) QCOMPARE(mInputMapKey(&map, InputController::KEYBOARD, Qt::Key_F1), -1);
+            mInputMapDeinit(&map);
+        }
+        QString closedDirectory = windows[1]->config()->instanceDirectory();
+        windows[1]->close();
+        QTRY_COMPARE_WITH_TIMEOUT(app->windows().size(), 7, 10000);
+        Window* replacement = app->newWindow();
+        QVERIFY(replacement);
+        QCOMPARE(replacement->config()->instanceDirectory(), closedDirectory);
+        QSet<QString> directories;
+        for (Window* w : app->windows()) directories.insert(w->config()->instanceDirectory());
+        QCOMPARE(directories.size(), 8);
+
     }
 	void menuLifetime() {
 		GBAApp::app()->setQuitOnLastWindowClosed(false);
@@ -197,6 +335,8 @@ private slots:
 			QVERIFY(controller);
 			inputs[i].controller = controller;
             inputs[i].breakWire = wireLoss && !i;
+            inputs[i].measureSpeed = ringTopology && !wireLoss;
+            inputs[i].deferMotion = ringTopology && !wireLoss;
 			controller->setPaused(true);
 			mCoreCallbacks callbacks{};
 			callbacks.context = &inputs[i];
@@ -249,7 +389,7 @@ private slots:
                     }
                     continue;
                 }
-				if (core->frameCounter(core) < 4300 || core->rawRead8(core, 0x0300361B, -1) != unsigned(players)) { entered = false; continue; }
+				if (core->frameCounter(core) < 4901 || (ringTopology && !wireLoss && !inputs[i].speedComplete) || core->rawRead8(core, 0x0300361B, -1) != unsigned(players)) { entered = false; continue; }
 				QCOMPARE(core->rawRead8(core, 0x0300361C, -1), unsigned(i));
 				QVERIFY(core->rawRead16(core, 0x0300361E, -1) & (mode == "vs" ? 0x400 : 0x800));
 				// The stock opponent-marker switch used to produce a null cell
@@ -265,6 +405,11 @@ private slots:
 					QVERIFY(driver >= 0x02000000 && driver < 0x03008000);
 					QCOMPARE(core->rawRead8(core, driver + 0xEC, -1), unsigned(racer));
 				}
+                if (ringTopology && !wireLoss) {
+                    double rate = double(inputs[i].lastSimulation - inputs[i].firstSimulation) / 600;
+                    qInfo("GUI player %d native game speed %.3f updates/video frame", i + 1, rate);
+                    QVERIFY2(rate >= 0.95, "GUI gameplay runs below 95% speed");
+                }
 				if (ringTopology) {
 					QCOMPARE(core->rawRead32(core, 0x03006B98, -1), 0U); // Protocol errors
 					QCOMPARE(core->rawRead32(core, 0x03006B9C, -1), 0U); // Timeouts

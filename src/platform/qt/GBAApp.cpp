@@ -71,7 +71,7 @@ GBAApp::GBAApp(int& argc, char* argv[], ConfigController* config)
 
 	m_manager.setConfig(m_configController->config());
 	m_manager.setMultiplayerController(&m_multiplayer);
-	m_multiplayer.setRingTopology(m_configController->getQtOption("gbaLinkTopology").toString() == QLatin1String("ring"));
+	m_multiplayer.setRingTopology(m_configController->getArgvOption("ring-players").isValid() || m_configController->getQtOption("gbaLinkTopology").toString() == QLatin1String("ring"));
 	connect(&m_multiplayer, &MultiplayerController::topologyChanged, this, [this]() {
 		for (Window* window : m_windows) window->updateMultiplayerStatus(m_windows.count() < m_multiplayer.maxPlayers());
 	});
@@ -139,7 +139,27 @@ Window* GBAApp::newWindow() {
 	if (m_windows.count() >= m_multiplayer.maxPlayers()) {
 		return nullptr;
 	}
-	Window* w = new Window(&m_manager, m_configController, m_windows.count());
+	ConfigController* config = m_configController;
+	QString directory = m_configController->getArgvOption("instance-settings").toString();
+	if (!directory.isEmpty()) {
+		QString playerDirectory;
+		for (int slot = 1; slot <= m_multiplayer.maxPlayers(); ++slot) {
+			QString candidate = QDir(directory).absoluteFilePath(QString("P%1").arg(slot));
+			bool used = false;
+			for (Window* existing : m_windows)
+				if (existing->config()->instanceDirectory() == candidate) used = true;
+			if (!used) { playerDirectory = candidate; break; }
+		}
+		QDir().mkpath(playerDirectory);
+		QString path = QDir(playerDirectory).filePath("config.ini");
+		// Seed once; subsequent windows load their own bindings and options.
+		if (!QFile::exists(path)) mCoreConfigSavePath(m_configController->config(), path.toUtf8().constData());
+		config = new ConfigController(this, playerDirectory);
+		config->seedQtSettings(*m_configController);
+		config->applyArguments(*m_configController);
+	}
+	Window* w = new Window(&m_manager, config, m_windows.count());
+	if (config != m_configController) connect(w, &Window::destroyed, config, &QObject::deleteLater);
 	connect(w, &Window::destroyed, [this, w]() {
 		m_windows.removeAll(w);
 		for (Window* w : m_windows) {
@@ -150,6 +170,7 @@ Window* GBAApp::newWindow() {
 	w->setAttribute(Qt::WA_DeleteOnClose);
 	w->loadConfig();
 	w->show();
+	if (m_configController->getArgvOption("hide-menu").toBool()) w->showMenu(false);
 	w->multiplayerChanged();
 	for (Window* w : m_windows) {
 		w->updateMultiplayerStatus(m_windows.count() < m_multiplayer.maxPlayers());
@@ -409,6 +430,12 @@ void GBAApp::finishJob(qint64 jobId) {
 
 void GBAApp::initMultiplayer() {
 	QStringList fnames = m_configController->fileNames();
+	int ringPlayers = m_configController->getArgvOption("ring-players").toInt();
+	if (ringPlayers && fnames.size() == 1) {
+		QString rom = fnames.first();
+		fnames.clear();
+		for (int i = 0; i < ringPlayers; ++i) fnames.append(rom);
+	}
 	if (fnames.count() < 2) {
 		return;
 	}
@@ -421,7 +448,10 @@ void GBAApp::initMultiplayer() {
 		if (!w) {
 			break;
 		}
+		if (ringPlayers) w->argumentsPassed(false);
+		m_manager.setConfig(w->config()->config());
 		CoreController* core = m_manager.loadGame(fname);
+		m_manager.setConfig(m_configController->config());
 		w->setController(core);
 		w = nullptr;
 	}

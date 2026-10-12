@@ -127,3 +127,8 @@ from appearing to start overlapping transfers solely because of core scheduling.
 The `gba-ring` CTest target covers this ordering and cancellation of a receiver.
 The GUI fixture also covers an eight-window wire loss at race startup and
 borrowed-core crash/shutdown lifetime.
+
+The Qt frontend accepts `--ring-players N ROM`, `--instance-settings DIR`, and
+`--hide-menu` for scripted local 2–8-console startup. See [GUI.md](GUI.md).
+Video CSV diagnostics also include the native scene pointer, BGM header/tempo,
+leading lap, a sky-region hash, and a Peach Circuit sky/asphalt pixel check.

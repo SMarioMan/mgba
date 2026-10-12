@@ -212,7 +212,7 @@ Window::~Window() {
 #endif
 }
 
-void Window::argumentsPassed() {
+void Window::argumentsPassed(bool loadGame) {
 	const mArguments* args = m_config->args();
 
 	if (args->patch) {
@@ -253,7 +253,7 @@ void Window::argumentsPassed() {
 		m_initialSize = size * m_savedScale;
 	}
 
-	if (args->fname) {
+	if (loadGame && args->fname) {
 		setController(m_manager->loadGame(args->fname));
 	}
 
@@ -539,6 +539,7 @@ void Window::openView(QWidget* widget) {
 }
 
 void Window::showMenu(bool show) {
+	m_menuHidden = !show;
 	if (auto hideMenu = m_actions.getAction("hideMenu")) {
 		hideMenu->setActive(!show);
 	}
@@ -689,6 +690,11 @@ void Window::scriptingOpen() {
 #endif
 
 void Window::keyPressEvent(QKeyEvent* event) {
+	if (m_menuHidden && event->key() == Qt::Key_Alt) {
+		menuBar()->show();
+		event->accept();
+		return;
+	}
 	if (event->isAutoRepeat()) {
 		QWidget::keyPressEvent(event);
 		return;
@@ -705,6 +711,11 @@ void Window::keyPressEvent(QKeyEvent* event) {
 }
 
 void Window::keyReleaseEvent(QKeyEvent* event) {
+	if (m_menuHidden && event->key() == Qt::Key_Alt) {
+		menuBar()->setFocus();
+		event->accept();
+		return;
+	}
 	if (event->isAutoRepeat()) {
 		QWidget::keyReleaseEvent(event);
 		return;
@@ -843,6 +854,7 @@ void Window::focusInEvent(QFocusEvent*) {
 }
 
 void Window::focusOutEvent(QFocusEvent*) {
+	if (m_menuHidden && !QApplication::activePopupWidget()) menuBar()->hide();
 }
 
 void Window::dragEnterEvent(QDragEnterEvent* event) {
@@ -976,6 +988,13 @@ void Window::gameStarted() {
 	interrupter.resume();
 
 	m_actions.rebuildMenu(menuBar(), this, *m_shortcutController);
+	for (QMenu* menu : menuBar()->findChildren<QMenu*>()) {
+		connect(menu, &QMenu::aboutToHide, this, [this]() {
+			QTimer::singleShot(0, this, [this]() {
+				if (m_menuHidden && !QApplication::activePopupWidget()) menuBar()->hide();
+			});
+		});
+	}
 
 #ifdef M_CORE_GBA
 	if (m_controller->platform() == mPLATFORM_GBA) {
@@ -1184,6 +1203,7 @@ void Window::reloadAudioDriver() {
 		m_audioProcessor = std::make_unique<AudioProcessorDummy>();
 		m_audioProcessor->setInput(m_controller);
 		m_audioProcessor->configure(m_config);
+		m_audioProcessor->start();
 	}
 }
 
@@ -1290,6 +1310,8 @@ void Window::updateTitle(float fps) {
 	} else {
 		setWindowTitle(tr("%1 - %2 (%3 fps) - %4").arg(projectName).arg(title).arg(fps).arg(projectVersion));
 	}
+	if (GBAApp::app()->multiplayer()->ringTopology())
+		setWindowTitle(windowTitle() + QString(" - P%1").arg(m_playerId + 1));
 }
 
 void Window::openStateWindow(LoadSave ls) {
@@ -1937,6 +1959,13 @@ void Window::setupMenu(QMenuBar* menubar) {
 
 	m_shortcutController->rebuildItems();
 	m_actions.rebuildMenu(menuBar(), this, *m_shortcutController);
+	for (QMenu* menu : menuBar()->findChildren<QMenu*>()) {
+		connect(menu, &QMenu::aboutToHide, this, [this]() {
+			QTimer::singleShot(0, this, [this]() {
+				if (m_menuHidden && !QApplication::activePopupWidget()) menuBar()->hide();
+			});
+		});
+	}
 }
 
 void Window::setupOptions() {
@@ -2133,6 +2162,13 @@ void Window::updateMRU() {
 	m_actions.addAction(tr("Clear"), "resetMru", this, &Window::clearMRU, "mru");
 
 	m_actions.rebuildMenu(menuBar(), this, *m_shortcutController);
+	for (QMenu* menu : menuBar()->findChildren<QMenu*>()) {
+		connect(menu, &QMenu::aboutToHide, this, [this]() {
+			QTimer::singleShot(0, this, [this]() {
+				if (m_menuHidden && !QApplication::activePopupWidget()) menuBar()->hide();
+			});
+		});
+	}
 }
 
 void Window::ensureScripting() {

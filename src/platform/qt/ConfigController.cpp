@@ -21,6 +21,9 @@
 
 static const mOption s_frontendOptions[] = {
 	{ "ecard", true, '\0' },
+	{ "ring-players", true, '\0' },
+	{ "instance-settings", true, '\0' },
+	{ "hide-menu", false, '\0' },
 	{ "mb", true, '\0' },
 #ifdef ENABLE_SCRIPTING
 	{ "script", true, '\0' },
@@ -122,14 +125,16 @@ void ConfigOption::setValue(const QVariant& value) {
 
 QString ConfigController::s_configDir;
 
-ConfigController::ConfigController(QObject* parent)
+ConfigController::ConfigController(QObject* parent, const QString& directory)
 	: QObject(parent)
+	, m_directory(directory)
 {
 #ifdef ENABLE_SCRIPTING
 	AutorunScriptModel::registerMetaTypes();
 #endif
 
-	QString fileName = configDir();
+	QString fileName = directory.isEmpty() ? configDir() : directory;
+	if (!directory.isEmpty()) QDir().mkpath(directory);
 	fileName.append(QDir::separator());
 	fileName.append("qt.ini");
 	m_settings = std::make_unique<QSettings>(fileName, QSettings::IniFormat);
@@ -150,7 +155,8 @@ ConfigController::ConfigController(QObject* parent)
 	m_opts.suspendScreensaver = true;
 	m_opts.lockAspectRatio = true;
 	m_opts.interframeBlending = false;
-	mCoreConfigLoad(&m_config);
+	if (directory.isEmpty()) mCoreConfigLoad(&m_config);
+	else mCoreConfigLoadPath(&m_config, QDir(directory).filePath("config.ini").toUtf8().constData());
 	mCoreConfigLoadDefaults(&m_config, &m_opts);
 #ifdef M_CORE_GB
 	mCoreConfigSetDefaultIntValue(&m_config, "sgb.borders", 1);
@@ -162,6 +168,9 @@ ConfigController::ConfigController(QObject* parent)
 	mSubParserGraphicsInit(&m_subparsers[0], &m_graphicsOpts);
 
 	m_subparsers[1].usage = "Frontend options:\n"
+	      "  --ring-players N  Open 2..8 ring windows running the one supplied ROM\n"
+	      "  --instance-settings DIR  Save independent P1..P8 configurations in DIR\n"
+	      "  --hide-menu    Hide window menu bars (Alt shows them temporarily)\n"
 	      "  --ecard FILE   Scan an e-Reader card in the first loaded game\n"
 	      "                 Can be passed multiple times for multiple cards\n"
 	      "  --mb FILE      Boot a multiboot image with FILE inserted into the ROM slot"
@@ -174,6 +183,21 @@ ConfigController::ConfigController(QObject* parent)
 	m_subparsers[1].parseLong = [](struct mSubParser* parser, const char* option, const char* arg) {
 		ConfigController* self = static_cast<ConfigController*>(parser->opts);
 		QString optionName(QString::fromUtf8(option));
+		if (optionName == QLatin1String("ring-players")) {
+			bool ok;
+			int count = QString::fromUtf8(arg).toInt(&ok);
+			if (!ok || count < 2 || count > 8) { self->m_argvOptions[optionName] = 0; return false; }
+			self->m_argvOptions[optionName] = count;
+			return true;
+		}
+		if (optionName == QLatin1String("instance-settings")) {
+			self->m_argvOptions[optionName] = QString::fromUtf8(arg);
+			return !self->m_argvOptions[optionName].toString().isEmpty();
+		}
+		if (optionName == QLatin1String("hide-menu")) {
+			self->m_argvOptions[optionName] = true;
+			return true;
+		}
 		if (optionName == QLatin1String("ecard")) {
 			QStringList ecards;
 			if (self->m_argvOptions.contains(optionName)) {
@@ -230,6 +254,12 @@ bool ConfigController::parseArguments(int argc, char* argv[]) {
 	}
 
 	if (mArgumentsParse(&m_args, argc, argv, m_subparsers.data(), m_subparsers.size())) {
+		if (m_argvOptions.contains("ring-players") && (m_argvOptions["ring-players"].toInt() < 2 || m_argvOptions["ring-players"].toInt() > 8 || !m_args.fname || !m_fnames.isEmpty()) && !m_args.showHelp && !m_args.showVersion) {
+			mArgumentsDeinit(&m_args);
+			return false;
+		}
+		if (m_argvOptions.contains("ring-players") && m_args.fname)
+			m_fnames.append(QString::fromUtf8(m_args.fname));
 		mCoreConfigFreeOpts(&m_opts);
 		mArgumentsApply(&m_args, m_subparsers.data(), m_subparsers.size(), &m_config);
 		mCoreConfigMap(&m_config, &m_opts);
@@ -237,6 +267,23 @@ bool ConfigController::parseArguments(int argc, char* argv[]) {
 		return true;
 	}
 	return false;
+}
+
+void ConfigController::applyArguments(const ConfigController& source) {
+	if (!source.m_parsed || &source == this) return;
+	m_argSource = &source;
+	m_graphicsOpts = source.m_graphicsOpts;
+	m_argvOptions = source.m_argvOptions;
+	mCoreConfigFreeOpts(&m_opts);
+	mArgumentsApply(&source.m_args, const_cast<mSubParser*>(source.m_subparsers.data()), source.m_subparsers.size(), &m_config);
+	mCoreConfigMap(&m_config, &m_opts);
+}
+
+void ConfigController::seedQtSettings(const ConfigController& source) {
+	if (!m_settings->allKeys().isEmpty()) return;
+	for (const QString& key : source.m_settings->allKeys())
+		m_settings->setValue(key, source.m_settings->value(key));
+	m_settings->sync();
 }
 
 ConfigOption* ConfigController::addOption(const char* key) {
@@ -428,7 +475,8 @@ constexpr const char* ConfigController::mruName(ConfigController::MRU mru) {
 }
 
 void ConfigController::write() {
-	mCoreConfigSave(&m_config);
+	if (m_directory.isEmpty()) mCoreConfigSave(&m_config);
+	else mCoreConfigSavePath(&m_config, QDir(m_directory).filePath("config.ini").toUtf8().constData());
 	m_settings->sync();
 
 	mCoreConfigFreeOpts(&m_opts);

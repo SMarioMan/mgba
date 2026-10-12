@@ -172,17 +172,20 @@ void mSDLDeinitEvents(struct mSDLEvents* context) {
 	SDL_QuitSubSystem(SDL_INIT_JOYSTICK);
 }
 
+void mSDLEventsLoadPlayerConfig(struct mSDLEvents* context, const struct Configuration* config, int i) {
+	if (i < 0 || i >= MAX_PLAYERS) return;
+#if SDL_VERSION_ATLEAST(2, 0, 0)
+	context->preferredJoysticks[i].type = mInputGetPreferredDeviceType(config, "gba", SDL_BINDING_CONTROLLER, i);
+	context->preferredJoysticks[i].serial = mInputGetPreferredDeviceSerial(config, "gba", SDL_BINDING_CONTROLLER, i);
+#else
+	context->preferredJoysticks[i].type = mInputGetPreferredDeviceType(config, "gba", SDL_BINDING_BUTTON, i);
+	context->preferredJoysticks[i].serial = mInputGetPreferredDeviceSerial(config, "gba", SDL_BINDING_BUTTON, i);
+#endif
+}
+
 void mSDLEventsLoadConfig(struct mSDLEvents* context, const struct Configuration* config) {
 	int i;
-	for (i = 0; i < MAX_PLAYERS; ++i) {
-#if SDL_VERSION_ATLEAST(2, 0, 0)
-		context->preferredJoysticks[i].type = mInputGetPreferredDeviceType(config, "gba", SDL_BINDING_CONTROLLER, i);
-		context->preferredJoysticks[i].serial = mInputGetPreferredDeviceSerial(config, "gba", SDL_BINDING_CONTROLLER, i);
-#else
-		context->preferredJoysticks[i].type = mInputGetPreferredDeviceType(config, "gba", SDL_BINDING_BUTTON, i);
-		context->preferredJoysticks[i].serial = mInputGetPreferredDeviceSerial(config, "gba", SDL_BINDING_BUTTON, i);
-#endif
-	}
+	for (i = 0; i < MAX_PLAYERS; ++i) mSDLEventsLoadPlayerConfig(context, config, i);
 }
 
 void mSDLInitBindingsGBA(struct mInputMap* inputMap) {
