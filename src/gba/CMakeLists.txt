@@ -50,7 +50,8 @@ set(DEBUGGER_FILES
 
 set(TEST_FILES
 	test/cheats.c
-	test/core.c)
+	test/core.c
+	test/ring.c)
 
 source_group("GBA board" FILES ${SOURCE_FILES})
 source_group("GBA extras" FILES ${EXTRA_FILES} ${SIO_FILES})

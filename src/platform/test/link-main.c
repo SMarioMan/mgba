@@ -26,6 +26,7 @@ struct Player {
 
 static FILE* videoLog;
 static unsigned videoFrom;
+static struct { uint32_t address; uint64_t cycles; } cycleProfile[8192];
 
 static void captureFrame(void* context) {
     struct Player* player = context;
@@ -54,7 +55,8 @@ static void captureFrame(void* context) {
             for (unsigned i = 0; i < 240 * 160; ++i)
                 bitmapHash = (bitmapHash ^ player->completedPixels[i]) * 16777619U;
         }
-        fprintf(videoLog, ",%u,%u,%u", invalid, markers, bitmapHash);
+        fprintf(videoLog, ",%u,%u,%u,%u", invalid, markers, bitmapHash,
+                player->core->rawRead32(player->core, 0x03002E30, -1));
         fputc('\n', videoLog);
     }
 }
@@ -199,6 +201,7 @@ int main(int argc, char** argv) {
 	struct mLogger logger = { .log = logMessage };
 	mLogSetDefaultLogger(&logger);
 	const char *rom = NULL, *bios = NULL, *inputPath = NULL, *prefix = NULL, *tracePath = NULL, *videoPath = NULL;
+	const char* profilePath = NULL;
 	unsigned players = 0, frames = 600;
 	unsigned expectHost = 0, breakFrame = UINT_MAX, restoreFrame = UINT_MAX;
 	uint32_t watch = 0, untilWatchValue = 0;
@@ -209,9 +212,10 @@ int main(int argc, char** argv) {
 	uint32_t barrierState = 0, untilScene = 0;
 	unsigned dumpWords = 32;
 	unsigned keySlots = 4, autodriveFrame = UINT_MAX, debugStepFrame = UINT_MAX;
-	bool ringMode = false, expectPoc = false, autofire = false, hle = false;
+	bool ringMode = false, expectPoc = false, autofire = false, hle = false, barrierBeforeInput = false;
 	for (int i = 1; i < argc; ++i) {
 		if (!strcmp(argv[i], "--hle")) { hle = true; continue; }
+		if (!strcmp(argv[i], "--barrier-before-input")) { barrierBeforeInput = true; continue; }
 		if (!strcmp(argv[i], "--autofire")) { autofire = true; continue; }
 		if (!strcmp(argv[i], "--ring")) { ringMode = true; continue; }
 		if (!strcmp(argv[i], "--expect-poc")) { expectPoc = true; continue; }
@@ -224,6 +228,7 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--input")) inputPath = value;
 		else if (!strcmp(option, "--screens")) prefix = value;
 		else if (!strcmp(option, "--video-log")) videoPath = value;
+		else if (!strcmp(option, "--profile-file")) profilePath = value;
 		else if (!strcmp(option, "--video-from") && number(value, &n) && n <= 100000) videoFrom = n;
 		else if (!strcmp(option, "--trace-file")) tracePath = value;
 		else if (!strcmp(option, "--trace-player") && number(value, &n) && n < 8) tracePlayer = n;
@@ -287,7 +292,7 @@ int main(int argc, char** argv) {
 	if (videoPath) {
 		videoLog = fopen(videoPath, "w");
 		if (!videoLog) { perror(videoPath); goto done; }
-		fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash\n");
+		fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames\n");
 	}
 	for (unsigned i = 0; i < players; ++i) {
 		p[i].id = i;
@@ -366,6 +371,7 @@ int main(int argc, char** argv) {
     bool allSceneMatch = false, snapshotFailed = false;
 	uint64_t stagnantSteps = 0;
 	uint32_t barrierRound = 0;
+	int barrierOwner = -1;
 	bool frozen[GBA_RING_MAX_PLAYERS] = { false };
     struct Route routes[GBA_RING_MAX_PLAYERS] = {0};
     unsigned drivenFrame[GBA_RING_MAX_PLAYERS] = {0};
@@ -404,6 +410,7 @@ int main(int argc, char** argv) {
 			for (unsigned i = 0; i < players; ++i) {
 				uint32_t round = p[i].core->busRead32(p[i].core, barrierState + 80);
 				if (round > barrierRound) barrierRound = round;
+				if (p[i].core->busRead8(p[i].core, barrierState + 110)) barrierOwner = i;
 			}
 			barrierRound += 2;
 		}
@@ -418,15 +425,25 @@ int main(int argc, char** argv) {
 				fprintf(stderr, " %u(frame=%u,pc=%08x,sleep=%u)", i, p[i].core->frameCounter(p[i].core), (unsigned) pc, p[i].asleep);
 			}
 			fputc('\n', stderr);
+			if (barrierState) {
+				snapshotFailed = true;
+				break;
+			}
 			free(applied);
 			goto done;
 		}
 		for (unsigned i = 0; i < players; ++i) {
 			struct mCore* core = p[i].core;
 			unsigned frame = core->frameCounter(core);
-			if (barrierRound && core->busRead32(core, barrierState + 80) == barrierRound &&
-			    core->busRead8(core, barrierState + 113) && !core->busRead8(core, barrierState + 112) &&
-			    !core->busRead8(core, barrierState + 119)) frozen[i] = true;
+			if (barrierRound && core->busRead32(core, barrierState + 80) == barrierRound) {
+				bool nextInput = core->busRead8(core, barrierState + 113) &&
+				                 !core->busRead8(core, barrierState + 112) &&
+				                 !core->busRead8(core, barrierState + 119);
+				if (!barrierBeforeInput) frozen[i] |= nextInput;
+				else if ((int)i == barrierOwner) frozen[i] |= core->busRead8(core, barrierState + 144);
+				else if (barrierOwner >= 0 && frozen[barrierOwner])
+					frozen[i] |= core->busRead8(core, barrierState + 144) || nextInput;
+			}
 			if (barrierState ? !frozen[i] : frame < frames) complete = false;
 			for (size_t e = 0; e < nInputs; ++e) {
 				if (!applied[e] && inputs[e].player == i && frame >= inputs[e].frame) {
@@ -446,6 +463,12 @@ int main(int argc, char** argv) {
 		if (selected < 0 || ++steps > (uint64_t) frames * players * 400000) {
 			fprintf(stderr, "Link deadlock or instruction budget exhausted\n"); free(applied); goto done;
 		}
+		bool profiling = profilePath && selected == (int)tracePlayer &&
+		                 p[selected].core->frameCounter(p[selected].core) >= videoFrom &&
+		                 p[selected].core->frameCounter(p[selected].core) < frames;
+		uint64_t profileTime = profiling ? mTimingGlobalTime(p[selected].core->timing) : 0;
+		int32_t profilePc = 0;
+		if (profiling) p[selected].core->readRegister(p[selected].core, "pc", &profilePc);
 #ifdef ENABLE_DEBUGGERS
         if (selected == (int) tracePlayer && debuggerAttached && p[tracePlayer].core->frameCounter(p[tracePlayer].core) >= debugStepFrame)
             {
@@ -467,9 +490,38 @@ int main(int argc, char** argv) {
         }
         else
 #endif
-		    p[selected].core->runLoop(p[selected].core);
+		    if (barrierBeforeInput && barrierRound) {
+		        /* The pre-input marker lasts only a few instructions. Keep
+		         * coarse scheduling for the run and step precisely at its end. */
+		        p[selected].core->step(p[selected].core);
+		    } else {
+		        p[selected].core->runLoop(p[selected].core);
+		    }
+		if (profiling) {
+			uint32_t key = ((uint32_t)profilePc & ~63U) + 1;
+			unsigned index = (key >> 6) & 8191;
+			unsigned probes = 0;
+			while (cycleProfile[index].address && cycleProfile[index].address != key) {
+				if (++probes == 8192) {
+					fprintf(stderr, "CPU profile exceeded 8192 distinct PC ranges\n");
+					free(applied);
+					goto done;
+				}
+				index = (index + 1) & 8191;
+			}
+			cycleProfile[index].address = key;
+			cycleProfile[index].cycles += mTimingGlobalTime(p[selected].core->timing) - profileTime;
+		}
 	}
 	free(applied);
+	if (profilePath) {
+		FILE* profile = fopen(profilePath, "w");
+		if (!profile) { perror(profilePath); goto done; }
+		fprintf(profile, "pc,cycles\n");
+		for (unsigned i = 0; i < 8192; ++i) if (cycleProfile[i].address)
+			fprintf(profile, "%08x,%" PRIu64 "\n", cycleProfile[i].address - 1, cycleProfile[i].cycles);
+		fclose(profile);
+	}
 	result = snapshotFailed || (untilScene && !allSceneMatch) ? 1 : 0;
 	printf("{\"bios\":\"%s\",\"topology\":\"%s\",\"players\":%u,\"frames\":%u,\"steps\":%llu,\"transfers\":%llu,\"missedReceivers\":%llu,\"collisions\":%llu,\"nodes\":[", hle ? "hle" : "real", ringMode ? "ring" : "stock", players, frames, (unsigned long long) steps, (unsigned long long) ring.transfers, (unsigned long long) ring.missedReceivers, (unsigned long long) ring.collisions);
 	for (unsigned i = 0; i < players; ++i) {
@@ -488,7 +540,7 @@ int main(int argc, char** argv) {
 		if (expectPoc && (magic != 0x52494E47 || id != (i + players - expectHost) % players || count != players || rounds < 100 || errors || timeouts)) result = 1;
 		printf("%s{\"slot\":%u,\"frame\":%u,\"siocnt\":%u,\"watch\":%u,\"poc\":{\"magic\":%u,\"id\":%u,\"count\":%u,\"rounds\":%u,\"errors\":%u,\"timeouts\":%u,\"frameCycles\":%u,\"inputs\":[", i ? "," : "", i, core->frameCounter(core), core->busRead16(core, 0x04000128), watch ? core->busRead32(core, watch) : 0, magic, id, count, rounds, errors, timeouts, core->busRead32(core, 0x02000040));
 		for (unsigned j = 0; j < 8; ++j) printf("%s%u", j ? "," : "", core->busRead32(core, 0x02000020 + j * 4));
-		printf("]},\"pc\":%u,\"lr\":%u,\"sp\":%u,\"irq\":%u,\"ime\":%u,\"gameFrames\":%u", (unsigned) pc, (unsigned) lr, (unsigned) sp, core->busRead16(core, 0x04000200), core->busRead16(core, 0x04000208), core->busRead32(core, 0x03002E34));
+		printf("]},\"pc\":%u,\"lr\":%u,\"sp\":%u,\"irq\":%u,\"ime\":%u,\"gameFrames\":%u", (unsigned) pc, (unsigned) lr, (unsigned) sp, core->busRead16(core, 0x04000200), core->busRead16(core, 0x04000208), core->busRead32(core, 0x03002E30));
         if (routes[i].checkpoints) {
             printf(",\"route\":[");
             for (unsigned cp = 0; cp < routes[i].checkpoints; ++cp)
@@ -536,7 +588,30 @@ int main(int argc, char** argv) {
                        valid ? core->busRead8(core, driver + 0x17D) : 0,
                        graphics, bytes, graphicsMatch ? "true" : "false");
 			}
-			printf("]}");
+            printf("],\"hud\":{\"skyPalette\":[");
+            for (unsigned j = 0; j < 16; ++j)
+                printf("%s%u", j ? "," : "", core->rawRead16(core, 0x05000120 + j * 2, -1));
+            printf("],\"portraits\":[");
+            for (unsigned row = 0; row < 4; ++row) {
+                printf("%s[", row ? "," : "");
+                for (unsigned tile = 0; tile < 4; ++tile)
+                    printf("%s%u", tile ? "," : "", core->rawRead16(core, 0x030006E0 + ((3 + row * 3 + tile / 2) * 32 + 1 + tile % 2) * 2, -1));
+                printf("]");
+            }
+            printf("],\"minimapTiles\":[");
+            for (unsigned tile = 0; tile < 64; ++tile)
+                printf("%s%u", tile ? "," : "", core->rawRead16(core, 0x030006E0 + ((12 + tile / 8) * 32 + 22 + tile % 8) * 2, -1));
+            unsigned balloons[8] = {0};
+            struct GBA* gba = core->board;
+            for (unsigned object = 0; object < 128; ++object) {
+                uint16_t* obj = gba->video.oam.raw + object * 4;
+                if ((obj[0] & 0x300) == 0x200) continue;
+                if ((obj[2] & 1023) == 0x09C && (obj[2] >> 12) >= 8)
+                    ++balloons[(obj[2] >> 12) - 8];
+            }
+            printf("],\"balloonSprites\":[");
+            for (unsigned j = 0; j < 8; ++j) printf("%s%u", j ? "," : "", balloons[j]);
+            printf("]}}");
 			uint32_t menu = core->busRead32(core, 0x0203EBE8);
             bool menuActive = menu >= 0x02000000 && menu <= 0x0203F278;
 			printf(",\"menu\":{\"address\":%u,\"active\":%s,\"playersMinusOne\":%u,\"localId\":%u,\"state\":%u,\"selection\":[", menu, menuActive ? "true" : "false", menuActive ? core->busRead32(core, menu + 8) : 0, menuActive ? core->busRead32(core, menu + 12) : 0, menuActive ? core->busRead32(core, menu + 0xD84) : 0);
