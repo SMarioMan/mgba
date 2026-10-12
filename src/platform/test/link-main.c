@@ -25,6 +25,7 @@ struct Player {
 };
 
 static FILE* videoLog;
+static FILE* progressLog;
 static unsigned videoFrom;
 static struct { uint32_t address; uint64_t cycles; } cycleProfile[8192];
 
@@ -32,6 +33,18 @@ static void captureFrame(void* context) {
     struct Player* player = context;
     memcpy(player->completedPixels, player->pixels, sizeof(player->pixels));
     unsigned frame = player->core->frameCounter(player->core);
+    if (progressLog && !player->id && !(frame % 600)) {
+        struct mCore* core = player->core;
+        fprintf(progressLog, "%u,%u,%u,%u", frame, core->rawRead32(core, 0x03002E20, -1),
+                core->rawRead8(core, 0x03003621, -1), core->rawRead8(core, 0x0300362B, -1));
+        for (unsigned i = 0; i < 8; ++i) {
+            uint32_t driver = core->rawRead32(core, 0x03003638 + i * 4, -1);
+            bool valid = (driver >= 0x02000000 && driver < 0x0203FE00) || (driver >= 0x03000000 && driver < 0x03007E00);
+            fprintf(progressLog, ",%d", valid ? (int) core->rawRead8(core, driver + 0xC7, -1) - 127 : 0);
+        }
+        fputc('\n', progressLog);
+        fflush(progressLog);
+    }
     if (videoLog && frame >= videoFrom) {
         struct GBA* gba = player->core->board;
         unsigned dispcnt = player->core->busRead16(player->core, 0x04000000);
@@ -115,16 +128,25 @@ struct Input {
 	unsigned frame, player, keys;
 };
 
+static unsigned emulationErrors;
+
 #ifdef ENABLE_DEBUGGERS
 struct MemoryTrace {
 	struct mDebuggerModule module;
 	FILE* output;
+	unsigned stopFromFrame;
+	bool stopped;
 };
 
 static void traceMemory(struct mDebuggerModule* module, enum mDebuggerEntryReason reason, struct mDebuggerEntryInfo* info) {
     module->isPaused = false;
     struct MemoryTrace* trace = (struct MemoryTrace*) module;
     if (reason == DEBUGGER_ENTER_BREAKPOINT || reason == DEBUGGER_ENTER_ILLEGAL_OP) {
+        if (reason == DEBUGGER_ENTER_ILLEGAL_OP) {
+            ++emulationErrors;
+            ((struct GBA*) module->p->core->board)->earlyExit = true;
+            if (emulationErrors > 20) return;
+        }
         int32_t divisor = 0;
         module->p->core->readRegister(module->p->core, "r1", &divisor);
         if (reason == DEBUGGER_ENTER_ILLEGAL_OP || !divisor || (info && info->address < 8 && module->p->core->frameCounter(module->p->core) > 500)) {
@@ -143,17 +165,31 @@ static void traceMemory(struct mDebuggerModule* module, enum mDebuggerEntryReaso
 	int32_t pc = 0;
 	module->p->core->readRegister(module->p->core, "pc", &pc);
 	fprintf(trace->output, "%u,%08x,%08x,%u,%u,%08x\n", module->p->core->frameCounter(module->p->core), (unsigned) pc, info->address, info->width, info->type.wp.accessType, info->type.wp.newValue);
+    if (!trace->stopped && (info->type.wp.accessType & WATCHPOINT_WRITE) &&
+        module->p->core->frameCounter(module->p->core) >= trace->stopFromFrame) {
+        trace->stopped = true;
+        ++emulationErrors;
+        ((struct GBA*) module->p->core->board)->earlyExit = true;
+        fprintf(stderr, "Stopped at traced write frame %u pc %08x address %08x:",
+                module->p->core->frameCounter(module->p->core), (unsigned) pc, info->address);
+        for (unsigned i = 0; i < 16; ++i) {
+            char name[8]; int32_t value = 0;
+            snprintf(name, sizeof(name), "r%u", i);
+            module->p->core->readRegister(module->p->core, name, &value);
+            fprintf(stderr, " %s=%08x", name, (unsigned) value);
+        }
+        fputc('\n', stderr);
+    }
 }
 
 #endif
-
-static unsigned emulationErrors;
 
 static void logMessage(struct mLogger* logger, int category, enum mLogLevel level, const char* format, va_list args) {
 	UNUSED(logger);
 	/* CpuSet alignment diagnostics still execute the BIOS implementation.
 	 * Unsupported BIOS calls, unlike those diagnostics, fail the run. */
 	if ((level & (mLOG_ERROR | mLOG_FATAL)) ||
+	    (!strcmp(mLogCategoryName(category), "GBA") && (level & mLOG_WARN) && strstr(format, "Illegal opcode")) ||
 	    (!strcmp(mLogCategoryName(category), "GBA BIOS") && (level & mLOG_STUB))) {
         if (++emulationErrors > 20) return;
 		fprintf(stderr, "%s: ", mLogCategoryName(category));
@@ -178,6 +214,9 @@ struct Route {
     int x[128], y[128], count[128];
     unsigned checkpoints, headerIndex;
     uint32_t track;
+    unsigned lastCheckpoint, motionFrame;
+    int motionX, motionY;
+    bool recovering;
     bool inMenu;
 };
 
@@ -219,6 +258,8 @@ static void drivePlayer(struct mCore* core, unsigned slot, struct Route* route, 
         route->checkpoints = n;
         route->track = track;
         route->headerIndex = headerIndex;
+        route->motionFrame = 0;
+        route->recovering = false;
         for (unsigned cp = 0; cp < n; ++cp) {
             route->x[cp] = core->busRead16(core, points + cp * 8) * 8;
             route->y[cp] = core->busRead16(core, points + cp * 8 + 2) * 8;
@@ -226,10 +267,35 @@ static void drivePlayer(struct mCore* core, unsigned slot, struct Route* route, 
         }
     }
     unsigned cp = core->busRead8(core, driver + 0x90) & 127;
-    unsigned target = (cp + 1) % route->checkpoints;
-    if (!route->count[target]) return;
     int x = (int32_t) core->busRead32(core, driver) >> 16;
     int y = (int32_t) core->busRead32(core, driver + 4) >> 16;
+    unsigned frame = core->frameCounter(core);
+    if (!route->motionFrame || cp != route->lastCheckpoint) {
+        route->lastCheckpoint = cp;
+        route->motionFrame = frame;
+        route->motionX = x; route->motionY = y;
+        route->recovering = false;
+    }
+    if (frame - route->motionFrame >= 120) {
+        int dx = x - route->motionX, dy = y - route->motionY;
+        /* An early turn can cut a corner into a tree or pipe. Revisit the
+         * current route point instead of accelerating into that obstacle
+         * indefinitely. This is keypad steering, not a game-state write. */
+        if ((int64_t) dx * dx + (int64_t) dy * dy < 144) route->recovering = true;
+        route->motionFrame = frame;
+        route->motionX = x; route->motionY = y;
+    }
+    unsigned target = (route->recovering ? cp : cp + 1) % route->checkpoints;
+    if (route->recovering) {
+        int dx = route->x[target] - x, dy = route->y[target] - y;
+        if ((int64_t) dx * dx + (int64_t) dy * dy < 576) {
+            route->recovering = false;
+            route->motionFrame = frame;
+            route->motionX = x; route->motionY = y;
+            target = (cp + 1) % route->checkpoints;
+        }
+    }
+    if (!route->count[target]) return;
     double direction = atan2(route->x[target] - x, y - route->y[target]);
     int desired = (int) (direction * 65536.0 / (2 * 3.141592653589793));
     int16_t error = desired - core->busRead16(core, driver + 0x7C);
@@ -252,12 +318,14 @@ int main(int argc, char** argv) {
 	mLogSetDefaultLogger(&logger);
 	const char *rom = NULL, *bios = NULL, *inputPath = NULL, *prefix = NULL, *tracePath = NULL, *videoPath = NULL;
 	const char* profilePath = NULL;
+	const char* progressPath = NULL;
 	unsigned players = 0, frames = 600;
 	unsigned expectHost = 0, breakFrame = UINT_MAX, restoreFrame = UINT_MAX;
 	uint32_t watch = 0, untilWatchValue = 0;
     bool untilWatch = false;
 	uint32_t traceAddress = 0;
 	unsigned tracePlayer = 0;
+	unsigned traceStopFrame = UINT_MAX;
 	uint32_t dumpAddress = 0, keysAddress = 0x03004F30;
 	uint32_t barrierState = 0, untilScene = 0, autoConfirmScene = 0;
 	unsigned dumpWords = 32;
@@ -278,10 +346,12 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--input")) inputPath = value;
 		else if (!strcmp(option, "--screens")) prefix = value;
 		else if (!strcmp(option, "--video-log")) videoPath = value;
+		else if (!strcmp(option, "--progress-file")) progressPath = value;
 		else if (!strcmp(option, "--profile-file")) profilePath = value;
 		else if (!strcmp(option, "--video-from") && number(value, &n) && n <= 100000) videoFrom = n;
 		else if (!strcmp(option, "--trace-file")) tracePath = value;
 		else if (!strcmp(option, "--trace-player") && number(value, &n) && n < 8) tracePlayer = n;
+		else if (!strcmp(option, "--trace-stop-frame") && number(value, &n) && n <= 100000) traceStopFrame = n;
 		else if (!strcmp(option, "--until-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) untilScene = n;
 		else if (!strcmp(option, "--auto-confirm-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) autoConfirmScene = n;
 		else if (!strcmp(option, "--barrier-state") && number(value, &n) && n >= 0x03000000 && n <= 0x03007F88) barrierState = n;
@@ -301,7 +371,7 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--restore-frame") && number(value, &n) && n < UINT_MAX) restoreFrame = n;
 		else { fprintf(stderr, "Invalid option: %s %s\n", option, value); return 2; }
 	}
-	if (!rom || (!hle && !bios) || (hle && bios) || players < 1U || players > (ringMode ? 8U : 4U) || !frames || expectHost >= players || tracePlayer >= players || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
+	if (!rom || (!hle && !bios) || (hle && bios) || players < 1U || players > (ringMode ? 8U : 4U) || !frames || expectHost >= players || tracePlayer >= players || (traceStopFrame != UINT_MAX && !tracePath) || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
 		fprintf(stderr, "Usage: mgba-link --rom FILE (--bios FILE | --hle) --players 1..4 [--ring (1..8)] [--frames N] [--input CSV] [--screens PREFIX] [--watch ADDRESS] [--expect-poc]\n");
 		return 2;
 	}
@@ -335,7 +405,7 @@ int main(int argc, char** argv) {
 	int result = 1;
 #ifdef ENABLE_DEBUGGERS
 	struct mDebugger debugger;
-	struct MemoryTrace trace = { .module = { .type = DEBUGGER_CUSTOM, .entered = traceMemory } };
+	struct MemoryTrace trace = { .module = { .type = DEBUGGER_CUSTOM, .entered = traceMemory }, .stopFromFrame = traceStopFrame };
 	bool debuggerAttached = false;
 #else
     if (tracePath || traceAddress) { fprintf(stderr, "Memory tracing requires ENABLE_DEBUGGERS\n"); goto done; }
@@ -344,6 +414,11 @@ int main(int argc, char** argv) {
 		videoLog = fopen(videoPath, "w");
 		if (!videoLog) { perror(videoPath); goto done; }
         fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus\n");
+	}
+	if (progressPath) {
+		progressLog = fopen(progressPath, "w");
+		if (!progressLog) { perror(progressPath); goto done; }
+		fprintf(progressLog, "frame,sceneMain,headerIndex,finishLap,lap0,lap1,lap2,lap3,lap4,lap5,lap6,lap7\n");
 	}
 	for (unsigned i = 0; i < players; ++i) {
 		p[i].id = i;
@@ -428,6 +503,10 @@ int main(int argc, char** argv) {
     unsigned drivenFrame[GBA_RING_MAX_PLAYERS] = {0};
 	for (;;) {
         if (emulationErrors) {
+#ifdef ENABLE_DEBUGGERS
+            if (trace.stopped) fprintf(stderr, "Requested traced write reached; stopping the run\n");
+            else
+#endif
             fprintf(stderr, "Emulator reported an error; stopping the run\n");
             free(applied); goto done;
         }
@@ -619,7 +698,7 @@ int main(int argc, char** argv) {
             printf("]");
         }
 		{
-			printf(",\"game\":{\"sceneMain\":%u,\"humanCount\":%u,\"localId\":%u,\"raceFlags\":%u,\"drivers\":[", core->busRead32(core, 0x03002E20), core->busRead8(core, 0x0300361B), core->busRead8(core, 0x0300361C), core->busRead16(core, 0x0300361E));
+			printf(",\"game\":{\"sceneMain\":%u,\"humanCount\":%u,\"localId\":%u,\"raceFlags\":%u,\"finishLap\":%u,\"drivers\":[", core->busRead32(core, 0x03002E20), core->busRead8(core, 0x0300361B), core->busRead8(core, 0x0300361C), core->busRead16(core, 0x0300361E), core->busRead8(core, 0x0300362B));
 			for (unsigned j = 0; j < 8; ++j) {
 				uint32_t driver = core->busRead32(core, 0x03003638 + j * 4);
 				bool valid = (driver >= 0x02000000 && driver < 0x0203FFBC) || (driver >= 0x03000000 && driver < 0x03007FBC);
@@ -633,15 +712,24 @@ int main(int argc, char** argv) {
 				       valid ? (int32_t) core->busRead32(core, driver) : 0,
 				       valid ? (int32_t) core->busRead32(core, driver + 4) : 0,
 				       valid ? (int32_t) core->busRead32(core, driver + 8) : 0);
-                printf(",\"id\":%u,\"character\":%u,\"yaw\":%u,\"checkpoint\":%u,\"lap\":%u,\"balloons\":%u,\"graphicsSource\":%u,\"graphicsBytes\":%u,\"graphicsMatch\":%s}",
+                printf(",\"id\":%u,\"character\":%u,\"yaw\":%u,\"checkpoint\":%u,\"lap\":%u,\"points\":%u,\"balloons\":%u,\"graphicsSource\":%u,\"graphicsBytes\":%u,\"graphicsMatch\":%s}",
                        valid ? core->busRead8(core, driver + 0xEC) : 255,
                        valid ? core->busRead8(core, driver + 0x4C) : 255,
                        valid ? core->busRead16(core, driver + 0x7C) : 0,
                        valid ? core->busRead8(core, driver + 0x90) & 127 : 0,
                        valid ? (int) core->busRead8(core, driver + 0xC7) - 127 : 0,
+                       valid ? core->busRead8(core, driver + 0xC4) : 0,
                        valid ? core->busRead8(core, driver + 0x17D) : 0,
                        graphics, bytes, graphicsMatch ? "true" : "false");
 			}
+            printf("],\"nativeStandings\":[");
+            for (unsigned j = 0; j < 8; ++j) {
+                uint32_t row = 0x0300007C + j * 16;
+                printf("%s{\"place\":%d,\"menuCharacter\":%d,\"points\":%d}", j ? "," : "",
+                       (int16_t) core->busRead16(core, row),
+                       (int16_t) core->busRead16(core, row + 2),
+                       (int16_t) core->busRead16(core, row + 6));
+            }
             printf("],\"hud\":{\"skyPalette\":[");
             for (unsigned j = 0; j < 16; ++j)
                 printf("%s%u", j ? "," : "", core->rawRead16(core, 0x05000120 + j * 2, -1));
@@ -724,6 +812,7 @@ done:
 	if (trace.output) fclose(trace.output);
 #endif
 	if (videoLog && fclose(videoLog)) result = 1;
+	if (progressLog && fclose(progressLog)) result = 1;
 	for (unsigned i = 0; i < initialized; ++i) {
 		if (ringMode) mTimingDeschedule(p[i].core->timing, &p[i].quantum);
 		if (ringMode && p[i].ring.ring) GBASIORingDetach(&p[i].ring);

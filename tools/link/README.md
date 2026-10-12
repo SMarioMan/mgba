@@ -83,6 +83,9 @@ avoiding suspension of a COMMIT that is still returning. This only controls emul
 `--trace-memory ADDRESS --trace-file PATH` observes a 16-byte range on console
 zero and writes frame, PC, address, width, access kind, and written value as CSV;
 this option requires `ENABLE_DEBUGGERS`.
+`--trace-stop-frame N` stops on the first traced write at or after frame N,
+prints the live CPU registers, and exits nonzero as an intentional debug stop.
+Illegal opcodes also fail the runner instead of endlessly producing diagnostics.
 
 `--trace-player N` selects the console observed by memory tracing and explicit
 instruction stepping. `--video-log PATH --video-from N` records every completed
@@ -112,7 +115,8 @@ still emit diagnostic JSON and screenshots and return a nonzero exit status.
 
 `--autodrive-frame N` observes the native AMKE route and local driver's heading
 and sends keypad steering after frame N. Large heading errors use A+B quick
-turning. `--autofire` periodically presses L. These helpers never modify race
+turning. After 120 frames without movement through a checkpoint, the controller
+revisits its current route point to recover from an obstacle before continuing. `--autofire` periodically presses L. These helpers never modify race
 RAM, and are ROM-specific test controllers rather than emulator features for
 arbitrary games. Emulator errors stop the run and fail it. Optional
 `--debug-step-frame N` supports instruction-level failure diagnosis.
@@ -126,6 +130,11 @@ cached/native counts and header indexes. With `--autodrive-frame`,
 active, allowing repeated GP result screens to advance through a whole cup.
 Combine `--until-scene` with `--watch ... --until-watch-value ...` to stop at
 the final cup result instead of its first race.
+`--progress-file PATH` writes lightweight, flushed AMKE scene/course/target-lap
+and eight-racer lap snapshots from console zero every 600 video frames. Unlike
+the full video log it does not scan graphics, so long-cup progress can be read
+while the run continues. `game.finishLap` reports the native encoded lap target
+(0x83 for three laps, 0x85 for five).
 
 `--profile-file PATH` records sampled PC ranges and elapsed emulated CPU cycles
 on `--trace-player` from `--video-from` until the requested frame threshold.
@@ -148,3 +157,9 @@ leading lap, a sky-region hash, and a Peach Circuit sky/asphalt pixel check.
 `balloonForeignPixels` counts balloon texels outside the reserved tint entries.
 JSON HUD snapshots include the published identity palettes, native minimap
 coordinate shift, and all ring dot positions for alignment assertions.
+
+JSON game snapshots expose each driver's native GP `points` and all eight
+`nativeStandings` records (place, menu-character index and cumulative points).
+The standings view is meaningful in the native or ring GP results scene,
+after its original eight-racer builder has run; race scenes reuse that memory
+for finish banners. This supports checking native tied ranks and score reuse.
