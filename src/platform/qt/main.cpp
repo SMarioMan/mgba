@@ -139,7 +139,7 @@ int main(int argc, char* argv[]) {
 	}
 
 	Window* w = application.newWindow();
-	w->argumentsPassed();
+	if (!configController.getArgvOption("ring-players").isValid()) w->argumentsPassed();
 
 	application.initMultiplayer();
 

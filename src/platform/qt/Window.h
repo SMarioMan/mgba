@@ -60,7 +60,7 @@ public:
 	void setConfig(ConfigController*);
 	ConfigController* config() { return m_config; }
 
-	void argumentsPassed();
+	void argumentsPassed(bool loadGame = true);
 
 	void resizeFrame(const QSize& size);
 
@@ -169,6 +169,7 @@ private slots:
 	void delayedCleanup();
 
 private:
+	bool m_menuHidden = false;
 	static const int FPS_TIMER_INTERVAL = 2000;
 	static const int MUST_RESTART_TIMEOUT = 10000;
 

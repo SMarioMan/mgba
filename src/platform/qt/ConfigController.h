@@ -72,11 +72,15 @@ public:
 		Script
 	};
 
-	ConfigController(QObject* parent = nullptr);
+	ConfigController(QObject* parent = nullptr, const QString& directory = QString());
 	~ConfigController();
+
+	const QString& instanceDirectory() const { return m_directory; }
 
 	const mCoreOptions* options() const { return &m_opts; }
 	bool parseArguments(int argc, char* argv[]);
+	void applyArguments(const ConfigController& source);
+	void seedQtSettings(const ConfigController& source);
 
 	ConfigOption* addOption(const char* key);
 	void updateOption(const char* key);
@@ -100,7 +104,7 @@ public:
 	const mCoreConfig* config() const { return &m_config; }
 	mCoreConfig* config() { return &m_config; }
 
-	const mArguments* args() const { return &m_args; }
+	const mArguments* args() const { return m_argSource ? m_argSource->args() : &m_args; }
 	const mGraphicsOpts* graphicsOpts() const { return &m_graphicsOpts; }
 	QStringList fileNames() const { return m_fnames; }
 	void usage(const char* arg0) const;
@@ -127,6 +131,8 @@ private:
 
 	Configuration* defaults() { return &m_config.defaultsTable; }
 
+	const ConfigController* m_argSource = nullptr;
+	QString m_directory;
 	mCoreConfig m_config;
 	mCoreOptions m_opts{};
 	mArguments m_args{};

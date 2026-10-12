@@ -57,6 +57,32 @@ static void captureFrame(void* context) {
         }
         fprintf(videoLog, ",%u,%u,%u,%u", invalid, markers, bitmapHash,
                 player->core->rawRead32(player->core, 0x03002E30, -1));
+        uint32_t skyHash = 2166136261U;
+        unsigned skyRoadPixels = 0;
+        for (unsigned y = 10; y < 54; ++y)
+            for (unsigned x = 100; x < 220; ++x)
+                skyHash = (skyHash ^ player->completedPixels[y * 240 + x]) * 16777619U;
+        for (unsigned y = 32; y < 54; ++y)
+            for (unsigned x = 60; x < 180; ++x) {
+                uint32_t color = player->completedPixels[y * 240 + x];
+                unsigned red = color & 255, green = (color >> 8) & 255, blue = (color >> 16) & 255;
+                if (red == green && green == blue && red >= 80 && red <= 160) ++skyRoadPixels;
+            }
+        unsigned lap = 0;
+        unsigned count = player->core->rawRead8(player->core, 0x03003634, -1);
+        if (count > 8) count = 0;
+        for (unsigned i = 0; i < count; ++i) {
+            uint32_t driver = player->core->rawRead32(player->core, 0x03003638 + i*4, -1);
+            if (driver >= 0x02000000 && driver < 0x03007000) {
+                unsigned rawLap = player->core->rawRead8(player->core, driver + 0xC7, -1);
+                unsigned racerLap = rawLap >= 127 ? rawLap - 127 : 0;
+                if (racerLap > lap) lap = racerLap;
+            }
+        }
+        fprintf(videoLog, ",%u,%u,%u,%u", skyHash,
+                player->core->rawRead32(player->core, 0x030066E0, -1),
+                player->core->rawRead16(player->core, 0x030066FE, -1), lap);
+        fprintf(videoLog, ",%u,%u", skyRoadPixels, player->core->rawRead32(player->core, 0x03002E20, -1));
         fputc('\n', videoLog);
     }
 }
@@ -292,7 +318,7 @@ int main(int argc, char** argv) {
 	if (videoPath) {
 		videoLog = fopen(videoPath, "w");
 		if (!videoLog) { perror(videoPath); goto done; }
-		fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames\n");
+		fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain\n");
 	}
 	for (unsigned i = 0; i < players; ++i) {
 		p[i].id = i;

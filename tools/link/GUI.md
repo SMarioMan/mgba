@@ -81,3 +81,44 @@ skip; a default CTest pass is not evidence of a played GUI session.
 
 Physical cable/electrical validation is still unavailable. See the game's
 `docs/ring-investigation.md` for full scope and hardware limitations.
+
+## Scripted launch and independent settings
+
+```sh
+mgba-qt --ring-players 8 --instance-settings ./ring-settings --hide-menu \
+  --bios gba.bin mksc-ring-boot-shared.gba
+```
+
+Use `mGBA.exe` instead of `mgba-qt` on Windows. `--ring-players N` accepts
+2 through 8 and one GBA ROM filename, which it loads in every window. It selects
+the ring topology automatically. Press Start in P1's connection menu to host.
+The title of each window ends in `P1`, `P2`, etc., in cable/window order.
+The usual BIOS, configuration overrides, scale, patch, and script arguments
+also apply to the launched windows.
+
+`--instance-settings DIR` creates `P1/config.ini` and `P1/qt.ini`, through P8,
+within DIR. Configure each window's keyboard/gamepad bindings in Settings;
+they persist separately and are loaded again on the next launch. Each active
+window keeps its own settings directory, including when another window closes
+and its directory is reused. SDL preferred-device loading updates that window's
+slot without clearing the other seven slots. Explicit command-line BIOS and
+configuration overrides apply to all participants, over their saved settings.
+
+`--hide-menu` keeps the windows windowed. Press Alt to reveal the menu bar;
+it hides after the menu closes or focus leaves. Ctrl+M toggles its visibility.
+
+The MKSC builder supports `--boot-ring`, `--no-music`, and `--shared-music`.
+See the ROM's `tools/ring/README.md` for the music policies and build commands.
+
+The ring coordinator aligns reset epochs to a shared LCD-frame boundary.
+Emulated CPU and serial frequencies remain unchanged. Audio-device failure
+starts a timed fallback consumer, so a console cannot stall with a full audio
+buffer after opening multiple windows.
+
+`scriptedLaunch` in the Qt fixture exercises eight unpaused windows, explicit
+`--bios`, hidden menus/Alt, two character cycles via Qt key events, a native
+physics-rate measurement, independent binding persistence, and settings-slot
+reuse. Set `MGBA_RING_GUI_BOOT_ROM` to a direct-boot ROM for that test.
+The regular Vs./Battle GUI cases measure 600 video frames after the native
+race counter begins advancing; movement is deferred during that measurement
+so a completed Battle's frozen counter cannot produce a false speed failure.
