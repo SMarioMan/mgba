@@ -35,7 +35,7 @@ static void captureFrame(void* context) {
     if (videoLog && frame >= videoFrom) {
         struct GBA* gba = player->core->board;
         unsigned dispcnt = player->core->busRead16(player->core, 0x04000000);
-        unsigned slots[8] = {0}, active = 0, invalid = 0, markers = 0;
+        unsigned slots[8] = {0}, active = 0, invalid = 0, markers = 0, balloonForeignPixels = 0;
         for (unsigned i = 0; i < 128; ++i) {
             uint16_t* obj = gba->video.oam.raw + i * 4;
             if ((obj[0] & 0x300) == 0x200) continue;
@@ -44,6 +44,12 @@ static void captureFrame(void* context) {
             unsigned tile = obj[2] & 1023;
             if (tile >= 512) ++slots[(tile - 512) / 64];
             if (tile == 0x132 && (obj[2] >> 12) >= 8) ++markers;
+            if (tile == 0x09C && (obj[2] >> 12) >= 8) {
+                for (unsigned pixel = 0; pixel < 256; ++pixel) {
+                    unsigned index = (((uint8_t*)gba->video.vram)[0x10000 + tile * 32 + pixel / 2] >> ((pixel & 1) * 4)) & 15;
+                    if (index > 2) ++balloonForeignPixels;
+                }
+            }
         }
         fprintf(videoLog, "%u,%u,%u,%u,%u", frame, player->id,
                 dispcnt, active,
@@ -82,7 +88,7 @@ static void captureFrame(void* context) {
         fprintf(videoLog, ",%u,%u,%u,%u", skyHash,
                 player->core->rawRead32(player->core, 0x030066E0, -1),
                 player->core->rawRead16(player->core, 0x030066FE, -1), lap);
-        fprintf(videoLog, ",%u,%u", skyRoadPixels, player->core->rawRead32(player->core, 0x03002E20, -1));
+        fprintf(videoLog, ",%u,%u,%u,%u", skyRoadPixels, player->core->rawRead32(player->core, 0x03002E20, -1), balloonForeignPixels, player->core->rawRead32(player->core, 0x030066E4, -1));
         fputc('\n', videoLog);
     }
 }
@@ -170,7 +176,8 @@ static int playerId(struct mLockstepUser* user) {
 
 struct Route {
     int x[128], y[128], count[128];
-    unsigned checkpoints;
+    unsigned checkpoints, headerIndex;
+    uint32_t track;
     bool inMenu;
 };
 
@@ -179,14 +186,29 @@ struct Route {
 static void drivePlayer(struct mCore* core, unsigned slot, struct Route* route, bool autofire) {
     unsigned videoMode = core->busRead16(core, 0x04000000) & 7;
     if (videoMode == 3 || videoMode == 4) {
-        if (!route->inMenu) core->setKeys(core, 0);
+        if (!route->inMenu) {
+            core->setKeys(core, 0);
+            route->checkpoints = 0;
+        }
         route->inMenu = true;
         return;
     }
     route->inMenu = false;
+    /* Do not steer during track loading/countdown. GP reuses the same racer
+     * addresses between courses, while their coordinates/checkpoints reset. */
+    if ((core->busRead8(core, 0x03003618) & 3) != 3) {
+        core->setKeys(core, 0);
+        route->checkpoints = 0;
+        return;
+    }
     slot = core->busRead8(core, 0x0300361C);
     uint32_t driver = core->busRead32(core, 0x03003638 + slot * 4);
     if (driver < 0x03000000 || driver >= 0x03007E00) return;
+    unsigned checkpoints = core->busRead16(core, 0x03002E58);
+    unsigned headerIndex = core->busRead8(core, 0x03003621);
+    if (route->track != core->busRead32(core, 0x030033B8) ||
+        route->checkpoints != checkpoints || route->headerIndex != headerIndex)
+        route->checkpoints = 0;
     if (!route->checkpoints) {
         unsigned n = core->busRead16(core, 0x03002E58);
         uint32_t track = core->busRead32(core, 0x030033B8);
@@ -195,6 +217,8 @@ static void drivePlayer(struct mCore* core, unsigned slot, struct Route* route, 
         uint32_t header = track + routeOffset;
         uint32_t points = header + core->busRead8(core, header + 3) + (core->busRead8(core, header + 4) << 8);
         route->checkpoints = n;
+        route->track = track;
+        route->headerIndex = headerIndex;
         for (unsigned cp = 0; cp < n; ++cp) {
             route->x[cp] = core->busRead16(core, points + cp * 8) * 8;
             route->y[cp] = core->busRead16(core, points + cp * 8 + 2) * 8;
@@ -235,7 +259,7 @@ int main(int argc, char** argv) {
 	uint32_t traceAddress = 0;
 	unsigned tracePlayer = 0;
 	uint32_t dumpAddress = 0, keysAddress = 0x03004F30;
-	uint32_t barrierState = 0, untilScene = 0;
+	uint32_t barrierState = 0, untilScene = 0, autoConfirmScene = 0;
 	unsigned dumpWords = 32;
 	unsigned keySlots = 4, autodriveFrame = UINT_MAX, debugStepFrame = UINT_MAX;
 	bool ringMode = false, expectPoc = false, autofire = false, hle = false, barrierBeforeInput = false;
@@ -259,6 +283,7 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--trace-file")) tracePath = value;
 		else if (!strcmp(option, "--trace-player") && number(value, &n) && n < 8) tracePlayer = n;
 		else if (!strcmp(option, "--until-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) untilScene = n;
+		else if (!strcmp(option, "--auto-confirm-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) autoConfirmScene = n;
 		else if (!strcmp(option, "--barrier-state") && number(value, &n) && n >= 0x03000000 && n <= 0x03007F88) barrierState = n;
 		else if (!strcmp(option, "--trace-memory") && number(value, &n) && n < UINT32_MAX - 16) traceAddress = n;
 		else if (!strcmp(option, "--dump-words") && number(value, &n) && n > 0 && n <= 4096) dumpWords = n;
@@ -276,8 +301,8 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--restore-frame") && number(value, &n) && n < UINT_MAX) restoreFrame = n;
 		else { fprintf(stderr, "Invalid option: %s %s\n", option, value); return 2; }
 	}
-	if (!rom || (!hle && !bios) || (hle && bios) || players < (ringMode ? 2U : 1U) || players > (ringMode ? 8U : 4U) || !frames || expectHost >= players || tracePlayer >= players || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
-		fprintf(stderr, "Usage: mgba-link --rom FILE (--bios FILE | --hle) --players 1..4 [--ring (2..8)] [--frames N] [--input CSV] [--screens PREFIX] [--watch ADDRESS] [--expect-poc]\n");
+	if (!rom || (!hle && !bios) || (hle && bios) || players < 1U || players > (ringMode ? 8U : 4U) || !frames || expectHost >= players || tracePlayer >= players || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
+		fprintf(stderr, "Usage: mgba-link --rom FILE (--bios FILE | --hle) --players 1..4 [--ring (1..8)] [--frames N] [--input CSV] [--screens PREFIX] [--watch ADDRESS] [--expect-poc]\n");
 		return 2;
 	}
 	struct Input* inputs = NULL;
@@ -318,7 +343,7 @@ int main(int argc, char** argv) {
 	if (videoPath) {
 		videoLog = fopen(videoPath, "w");
 		if (!videoLog) { perror(videoPath); goto done; }
-		fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain\n");
+        fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus\n");
 	}
 	for (unsigned i = 0; i < players; ++i) {
 		p[i].id = i;
@@ -479,6 +504,8 @@ int main(int argc, char** argv) {
 			}
             if (frame >= autodriveFrame && frame != drivenFrame[i]) {
                 drivePlayer(core, i, &routes[i], autofire);
+                if (autoConfirmScene && core->busRead32(core, 0x03002E20) == autoConfirmScene)
+                    core->setKeys(core, frame % 60 < 15 ? 1 : 0);
                 drivenFrame[i] = frame;
             }
 			if (p[i].asleep || frozen[i]) continue;
@@ -568,7 +595,8 @@ int main(int argc, char** argv) {
 		for (unsigned j = 0; j < 8; ++j) printf("%s%u", j ? "," : "", core->busRead32(core, 0x02000020 + j * 4));
 		printf("]},\"pc\":%u,\"lr\":%u,\"sp\":%u,\"irq\":%u,\"ime\":%u,\"gameFrames\":%u", (unsigned) pc, (unsigned) lr, (unsigned) sp, core->busRead16(core, 0x04000200), core->busRead16(core, 0x04000208), core->busRead32(core, 0x03002E30));
         if (routes[i].checkpoints) {
-            printf(",\"route\":[");
+            printf(",\"routeCheckpoints\":%u,\"nativeCheckpoints\":%u,\"routeHeader\":%u,\"nativeHeader\":%u,\"route\":[", routes[i].checkpoints,
+                   core->busRead16(core, 0x03002E58), routes[i].headerIndex, core->busRead8(core, 0x03003621));
             for (unsigned cp = 0; cp < routes[i].checkpoints; ++cp)
                 printf("%s[%d,%d,%d]", cp ? "," : "", routes[i].x[cp], routes[i].y[cp], routes[i].count[cp]);
             printf("]");
@@ -637,6 +665,19 @@ int main(int argc, char** argv) {
             }
             printf("],\"balloonSprites\":[");
             for (unsigned j = 0; j < 8; ++j) printf("%s%u", j ? "," : "", balloons[j]);
+            printf("],\"identityPalette\":[");
+            for (unsigned j = 0; j < 8; ++j)
+                printf("%s[%u,%u]", j ? "," : "", core->rawRead16(core, 0x05000302 + j * 32, -1), core->rawRead16(core, 0x05000304 + j * 32, -1));
+            uint32_t trackDef = core->rawRead32(core, 0x030033B8, -1);
+            unsigned minimapShift = (core->rawRead8(core, 0x03003621, -1) & 32) || core->rawRead8(core, trackDef + 0xCA, -1) ? 20 : 21;
+            printf("],\"minimapShift\":%u,\"minimapDots\":[", minimapShift);
+            bool firstDot = true;
+            for (unsigned j = 0; j < 128; ++j) {
+                uint16_t* obj = gba->video.oam.raw + j * 4;
+                if ((obj[0] & 0x300) == 0x200 || (obj[2] & 1023) != 0x133 || (obj[2] >> 12) < 8) continue;
+                printf("%s[%u,%u,%u]", firstDot ? "" : ",", (obj[2] >> 12) - 8, obj[1] & 511, obj[0] & 255);
+                firstDot = false;
+            }
             printf("]}}");
 			uint32_t menu = core->busRead32(core, 0x0203EBE8);
             bool menuActive = menu >= 0x02000000 && menu <= 0x0203F278;

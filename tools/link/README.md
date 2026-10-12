@@ -4,7 +4,9 @@ For local Qt windows, see [GUI ring linking](GUI.md).
 
 Enable `BUILD_TEST=ON`, `BUILD_HEADLESS=ON`, and `BUILD_SUITE=ON` in CMake.
 `mgba-link` uses the existing core and stock lockstep driver for 2–4 consoles;
-`--ring` uses the independent normal-serial ring driver for 2–8 consoles.
+`--ring` uses the independent normal-serial ring driver for 1–8 consoles.
+One console supports the MKSC variant's solo Grand Prix test path; GUI ring
+launches still require 2–8 consoles.
 A valid 16 KiB external BIOS and BIOS boot are the default validation path.
 Pass either `--bios FILE` or `--hle`; the latter explicitly exercises mGBA's
 built-in BIOS implementation without loading an external BIOS. The runner
@@ -115,6 +117,16 @@ RAM, and are ROM-specific test controllers rather than emulator features for
 arbitrary games. Emulator errors stop the run and fail it. Optional
 `--debug-step-frame N` supports instruction-level failure diagnosis.
 
+The driver waits for native loading/countdown to finish and reloads route
+coordinates when the course header, data pointer, or checkpoint count changes.
+Loading can publish those fields in separate steps; a matching pointer alone
+is insufficient to keep a route cache valid. JSON route diagnostics report
+cached/native counts and header indexes. With `--autodrive-frame`,
+`--auto-confirm-scene ADDRESS` sends periodic A presses while that scene is
+active, allowing repeated GP result screens to advance through a whole cup.
+Combine `--until-scene` with `--watch ... --until-watch-value ...` to stop at
+the final cup result instead of its first race.
+
 `--profile-file PATH` records sampled PC ranges and elapsed emulated CPU cycles
 on `--trace-player` from `--video-from` until the requested frame threshold.
 It is a sampling profile, including interrupts and DMA encountered in each
@@ -132,3 +144,7 @@ The Qt frontend accepts `--ring-players N ROM`, `--instance-settings DIR`, and
 `--hide-menu` for scripted local 2–8-console startup. See [GUI.md](GUI.md).
 Video CSV diagnostics also include the native scene pointer, BGM header/tempo,
 leading lap, a sky-region hash, and a Peach Circuit sky/asphalt pixel check.
+`musicStatus` distinguishes a stopped player from a stale song-header pointer;
+`balloonForeignPixels` counts balloon texels outside the reserved tint entries.
+JSON HUD snapshots include the published identity palettes, native minimap
+coordinate shift, and all ring dot positions for alignment assertions.
