@@ -414,6 +414,9 @@ static THREAD_ENTRY _mCoreThreadRun(void* context) {
 		MutexLock(&impl->stateMutex);
 	}
 
+	/* A borrowed core can request shutdown or crash inside its callback.
+	 * Its owner must not clear callbacks or free thread state mid-slice. */
+	while (impl->borrowed) ConditionWait(&impl->stateOnThreadCond, &impl->stateMutex);
 	if (impl->state < mTHREAD_SHUTDOWN) {
 		impl->state = mTHREAD_SHUTDOWN;
 	}
@@ -605,6 +608,7 @@ void mCoreThreadInterrupt(struct mCoreThread* threadContext) {
 	MutexLock(&threadContext->impl->stateMutex);
 	++threadContext->impl->interruptDepth;
 	if (threadContext->impl->interruptDepth > 1 || !_isActive(threadContext->impl)) {
+		while (threadContext->impl->borrowed) _wait(threadContext->impl);
 		MutexUnlock(&threadContext->impl->stateMutex);
 		return;
 	}
@@ -749,6 +753,7 @@ bool mCoreThreadRunWaiting(struct mCoreThread* threadContext, ThreadCallback cal
 	ThreadLocalSetKey(_contextKey, previous);
 	MutexLock(&impl->stateMutex);
 	impl->borrowed = false;
+	ConditionWake(&impl->stateOffThreadCond);
 	if (impl->state != mTHREAD_PAUSED || impl->requested != mTHREAD_REQ_WAIT)
 		ConditionWake(&impl->stateOnThreadCond);
 	MutexUnlock(&impl->stateMutex);

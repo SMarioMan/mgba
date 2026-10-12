@@ -21,8 +21,16 @@ static void _updateInputs(struct GBASIORing* ring) {
 static void _finish(struct mTiming* timing, void* context, uint32_t late) {
 	UNUSED(timing);
 	struct GBASIORingDriver* p = context;
+	struct GBASIORing* ring = p->ring;
+	/* Every receiver finishes on the same wire edge. Defer the clock
+	 * owner's IRQ until the scheduler has applied that edge to all peers,
+	 * otherwise a timer-driven ROM can launch a false overlapping shift. */
+	if (p == ring->clockOwner && ring->pending > 1) {
+		ring->ownerFinished = true;
+		return;
+	}
 	p->active = false;
-	--p->ring->pending;
+	--ring->pending;
 	/* A cancelled transfer or mode switch must not clobber unrelated IO. */
 	if (p->d.p->mode == p->transferMode && GBASIONormalIsStart(p->d.p->siocnt)) {
 		if (p->transferMode == GBA_SIO_NORMAL_32) {
@@ -33,6 +41,11 @@ static void _finish(struct mTiming* timing, void* context, uint32_t late) {
 	}
 	p->idleSo = GBASIONormalIsIdleSo(p->d.p->siocnt);
 	_updateInputs(p->ring);
+	if (ring->ownerFinished && ring->pending == 1) {
+		ring->ownerFinished = false;
+		struct GBASIORingDriver* owner = ring->clockOwner;
+		_finish(&owner->d.p->p->timing, owner, 0);
+	}
 }
 
 static bool _start(struct GBASIODriver* d) {
@@ -78,6 +91,8 @@ static uint16_t _ring_write(struct GBASIODriver* d, uint16_t value) {
 		}
 	}
 	int64_t finish = mTimingGlobalTime(&d->p->p->timing) + p->timeOffset + GBASIOTransferCycles(d->p->mode, value, 1);
+	ring->clockOwner = p;
+	ring->ownerFinished = false;
 	++ring->transfers;
 	for (unsigned i = 0; i < ring->count; ++i) {
 		if (!receiving[i]) {
@@ -106,6 +121,15 @@ static void _reset(struct GBASIODriver* d) {
 	mTimingDeschedule(&d->p->p->timing, &p->event);
 	if (p->active) {
 		--p->ring->pending;
+	}
+	if (p->ring->clockOwner == p) {
+		p->ring->clockOwner = NULL;
+		p->ring->ownerFinished = false;
+	}
+	if (p->ring->ownerFinished && p->ring->pending == 1) {
+		p->ring->ownerFinished = false;
+		struct GBASIORingDriver* owner = p->ring->clockOwner;
+		_finish(&owner->d.p->p->timing, owner, 0);
 	}
 	p->active = false;
 	p->idleSo = true;

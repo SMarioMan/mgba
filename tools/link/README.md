@@ -63,8 +63,9 @@ clock owner attempting an overlapping transfer increments collisions.
 
 Attached cores must run in one thread in timestamp order. The runner uses
 a recurring 256-cycle scheduling event for the ring, including BIOS HALT,
-and stock lockstep event boundaries for the normal cable. This driver is not integrated into Qt, a network lobby, or
-savestates. Intermediate bit-edge visibility, partial shifts, electrical cable
+and stock lockstep event boundaries for the normal cable. The Qt adapter also
+uses timestamp-ordered slices while safely borrowing waiting cores. Network
+lobbies and ring savestates are not implemented. Intermediate bit-edge visibility, partial shifts, electrical cable
 characteristics, hot attachment, and multi-threaded ring emulation are outside
 its present model.
 
@@ -73,7 +74,9 @@ its present model.
 `--barrier-state ADDRESS` accepts the MKSC ring state in IWRAM: after the
 requested video-frame threshold, all consoles stop at the same future input
 round, before physics starts. Failure to reach that barrier within 240 further
-video frames exits with an error. This only controls emulator scheduling.
+video frames exits with an error. `--barrier-before-input` freezes the clock
+owner before the next sample, then stops peers at the same completed round,
+avoiding suspension of a COMMIT that is still returning. This only controls emulator scheduling.
 `displayRegisters` reports cached display IO, including write-only affine values.
 `--trace-memory ADDRESS --trace-file PATH` observes a 16-byte range on console
 zero and writes frame, PC, address, width, access kind, and written value as CSV;
@@ -83,7 +86,7 @@ this option requires `ENABLE_DEBUGGERS`.
 instruction stepping. `--video-log PATH --video-from N` records every completed
 frame from N onward as CSV: display mode/page, active and invalid OAM entries,
 each native kart texture slot's sprite count, identity marker count, input
-commits, and a Mode 4 completed-bitmap hash. Game snapshots also report each
+commits, the native MKSC simulation-frame counter, and a Mode 4 completed-bitmap hash. Game snapshots also report each
 driver's native texture source, byte count, and whether its VRAM bank matches.
 These observations do not alter game RAM. The MKSC `test_rendering.py` uses
 them to distinguish sprite loss, texture corruption, and bitmap tearing from
@@ -111,3 +114,16 @@ turning. `--autofire` periodically presses L. These helpers never modify race
 RAM, and are ROM-specific test controllers rather than emulator features for
 arbitrary games. Emulator errors stop the run and fail it. Optional
 `--debug-step-frame N` supports instruction-level failure diagnosis.
+
+`--profile-file PATH` records sampled PC ranges and elapsed emulated CPU cycles
+on `--trace-player` from `--video-from` until the requested frame threshold.
+It is a sampling profile, including interrupts and DMA encountered in each
+slice. Palette, native HUD/minimap tiles, and balloon palette counts are also
+available in game diagnostics.
+
+Ring transfer completion defers the owner's IRQ until all receivers' events
+for the same physical edge have been applied. This prevents a timer-driven ROM
+from appearing to start overlapping transfers solely because of core scheduling.
+The `gba-ring` CTest target covers this ordering and cancellation of a receiver.
+The GUI fixture also covers an eight-window wire loss at race startup and
+borrowed-core crash/shutdown lifetime.

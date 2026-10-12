@@ -20,6 +20,8 @@ struct GBASIORing {
 	uint64_t missedReceivers;
 	uint64_t collisions;
 	unsigned pending;
+	struct GBASIORingDriver* clockOwner;
+	bool ownerFinished;
 	/* Test wiring: bit i opens the SO[i-1] -> SI[i] connection. */
 	uint8_t openInputs;
 };

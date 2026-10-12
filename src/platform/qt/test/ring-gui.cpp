@@ -5,6 +5,7 @@
 #include "platform/qt/GBAApp.h"
 #include "platform/qt/Window.h"
 #include <mgba/internal/gba/gba.h>
+#include <mgba/internal/gba/sio/ring.h>
 #include <QAction>
 #include <QComboBox>
 #include <QFile>
@@ -12,6 +13,10 @@
 #include <QTimer>
 #include <QTemporaryDir>
 #include <QTest>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 using namespace QGBA;
 
@@ -20,10 +25,15 @@ struct Inputs {
 	QList<QPair<unsigned, unsigned>> events;
 	int next = 0;
 	unsigned held = 0;
+    bool breakWire = false;
 	static void frame(void* context) {
 		Inputs* inputs = static_cast<Inputs*>(context);
 		mCore* core = inputs->controller->thread()->core;
 		unsigned frame = core->frameCounter(core);
+        if (inputs->breakWire && frame >= 2600) {
+            auto driver = reinterpret_cast<GBASIORingDriver*>(static_cast<GBA*>(core->board)->sio.driver);
+            driver->ring->openInputs = frame < 2900 ? 1U << 4 : 0;
+        }
 		while (inputs->next < inputs->events.size() && inputs->events[inputs->next].first <= frame) {
 			unsigned keys = inputs->events[inputs->next++].second;
 			for (int key = 0; key < 10; ++key) {
@@ -39,6 +49,69 @@ class RingGuiTest : public QObject {
 Q_OBJECT
     Inputs inputs[8];
 private slots:
+    void borrowedFailureLifetime() {
+        // A crashed or exiting borrowed core must remain exclusively owned
+        // until its callback returns, before the GUI can detach its cable.
+        for (bool shutdown : {false, true}) {
+            struct Gate {
+                std::mutex mutex;
+                std::condition_variable condition;
+                bool entered = false, release = false;
+                bool shutdown;
+                std::atomic<bool> interrupted{false};
+            } gate;
+            gate.shutdown = shutdown;
+            mCore* core = mCoreCreate(mPLATFORM_GBA);
+            QVERIFY(core && core->init(core));
+            mCoreConfigInit(&core->config, nullptr);
+            mCoreThread thread{};
+            thread.core = core;
+            thread.userData = &gate;
+            thread.resetOverride = [](mCoreThread*) {};
+            thread.runLoopOverride = [](mCoreThread* t) { mCoreThreadWaitFromThread(t); };
+            QVERIFY(mCoreThreadStart(&thread));
+            bool waiting = false;
+            for (unsigned i = 0; i < 1000 && !waiting; ++i) {
+                MutexLock(&thread.impl->stateMutex);
+                waiting = thread.impl->waitingOnCondition && thread.impl->requested == mTHREAD_REQ_WAIT;
+                MutexUnlock(&thread.impl->stateMutex);
+                if (!waiting) QTest::qWait(1);
+            }
+            QVERIFY(waiting);
+            bool borrowed = false;
+            std::thread worker([&] {
+                borrowed = mCoreThreadRunWaiting(&thread, [](mCoreThread* t) {
+                    Gate* g = static_cast<Gate*>(t->userData);
+                    if (g->shutdown) mCoreThreadEnd(t);
+                    else mCoreThreadMarkCrashed(t);
+                    std::unique_lock<std::mutex> lock(g->mutex);
+                    g->entered = true;
+                    g->condition.notify_all();
+                    g->condition.wait(lock, [&] { return g->release; });
+                });
+            });
+            {
+                std::unique_lock<std::mutex> lock(gate.mutex);
+                gate.condition.wait(lock, [&] { return gate.entered; });
+            }
+            std::thread gui([&] { mCoreThreadInterrupt(&thread); gate.interrupted = true; });
+            QTest::qWait(25);
+            bool premature = gate.interrupted;
+            {
+                std::lock_guard<std::mutex> lock(gate.mutex);
+                gate.release = true;
+                gate.condition.notify_all();
+            }
+            worker.join();
+            gui.join();
+            mCoreThreadContinue(&thread);
+            mCoreThreadEnd(&thread);
+            mCoreThreadJoin(&thread);
+            core->deinit(core);
+            QVERIFY(borrowed);
+            QVERIFY2(!premature, "GUI interruption returned before the borrowed failure callback finished");
+        }
+    }
 	void menuLifetime() {
 		GBAApp::app()->setQuitOnLastWindowClosed(false);
 		for (int i = 0; i < 3; ++i) {
@@ -58,11 +131,13 @@ private slots:
 		QTest::addColumn<QString>("mode");
 		QTest::addColumn<bool>("ringTopology");
 		QTest::addColumn<bool>("lateBoot");
+        QTest::addColumn<bool>("wireLoss");
 		for (int players : {2, 8}) for (const QString& mode : {QString("vs"), QString("battle")})
-			QTest::newRow(qPrintable(QString("%1-%2").arg(mode).arg(players))) << players << mode << true << false;
-		QTest::newRow("vs-2-late") << 2 << QString("vs") << true << true;
+			QTest::newRow(qPrintable(QString("%1-%2").arg(mode).arg(players))) << players << mode << true << false << false;
+		QTest::newRow("vs-8-loss-start") << 8 << QString("vs") << true << false << true;
+        QTest::newRow("vs-2-late") << 2 << QString("vs") << true << true << false;
 		for (const QString& mode : {QString("vs"), QString("battle")})
-			QTest::newRow(qPrintable(QString("stock-%1-4").arg(mode))) << 4 << mode << false << false;
+			QTest::newRow(qPrintable(QString("stock-%1-4").arg(mode))) << 4 << mode << false << false << false;
 	}
 
 	void ring() {
@@ -72,6 +147,7 @@ private slots:
 		QFETCH(QString, mode);
 		QFETCH(bool, ringTopology);
 		QFETCH(bool, lateBoot);
+        QFETCH(bool, wireLoss);
 		GBAApp* app = GBAApp::app();
 		app->setQuitOnLastWindowClosed(false);
 		CoreManager manager;
@@ -120,6 +196,7 @@ private slots:
 			CoreController* controller = manager.loadGame(rom);
 			QVERIFY(controller);
 			inputs[i].controller = controller;
+            inputs[i].breakWire = wireLoss && !i;
 			controller->setPaused(true);
 			mCoreCallbacks callbacks{};
 			callbacks.context = &inputs[i];
@@ -161,6 +238,17 @@ private slots:
 				if (timer.elapsed() >= nextProgress) qInfo("GUI player %d: frame %u, humans %u", i, core->frameCounter(core), core->rawRead8(core, 0x0300361B, -1));
 				QVERIFY(static_cast<GBA*>(core->board)->biosVf);
 				QVERIFY(!mCoreThreadHasExited(windows[i]->controller()->thread()));
+                QVERIFY(!mCoreThreadHasCrashed(windows[i]->controller()->thread()));
+                if (wireLoss) {
+                    if (core->frameCounter(core) < 3600 || core->rawRead8(core, 0x03006BAD, -1)) {
+                        entered = false;
+                    } else {
+                        QCOMPARE(core->rawRead8(core, 0x03006BAB, -1), 8U);
+                        QVERIFY(core->rawRead32(core, 0x03006B98, -1) ||
+                                core->rawRead32(core, 0x03006B9C, -1));
+                    }
+                    continue;
+                }
 				if (core->frameCounter(core) < 4300 || core->rawRead8(core, 0x0300361B, -1) != unsigned(players)) { entered = false; continue; }
 				QCOMPARE(core->rawRead8(core, 0x0300361C, -1), unsigned(i));
 				QVERIFY(core->rawRead16(core, 0x0300361E, -1) & (mode == "vs" ? 0x400 : 0x800));
@@ -186,7 +274,8 @@ private slots:
 			if (timer.elapsed() >= nextProgress) nextProgress += 30000;
 		}
 		QVERIFY2(entered, "GUI windows did not enter a linked race through keypad input");
-		qInfo("GUI %s/%d entered with real BIOS in %lld ms", qPrintable(mode), players, timer.elapsed());
+		qInfo("GUI %s/%d %s with real BIOS in %lld ms", qPrintable(mode), players,
+              wireLoss ? "survived a start-time wire loss" : "entered", timer.elapsed());
 		if (ringTopology) {
 			QAction* pause = nullptr;
 			for (QAction* action : first->findChildren<QAction*>()) if (QString(action->text()).remove('&') == "Pause") pause = action;
