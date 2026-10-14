@@ -112,6 +112,10 @@ arming the end barrier; `--frames` then sets the maximum wait budget.
 `--watch ADDRESS --until-watch-value VALUE` additionally waits for that 32-bit
 value on every core, useful for cumulative results. Failed scene/barrier waits
 still emit diagnostic JSON and screenshots and return a nonzero exit status.
+`--settle-frames N` additionally waits N video frames with the requested scene
+and watch value unchanged before taking the barrier snapshot. Use this when a
+scene pointer changes before its native menu initialization publishes graphics.
+Automatic confirmation stops once the requested watch value is reached.
 
 `--autodrive-frame N` observes the native AMKE route and local driver's heading
 and sends keypad steering after frame N. Large heading errors use A+B with R

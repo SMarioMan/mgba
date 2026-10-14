@@ -401,6 +401,7 @@ int main(int argc, char** argv) {
 	unsigned traceStopFrame = UINT_MAX, profileUntil = UINT_MAX, profileFrom = UINT_MAX;
 	uint32_t dumpAddress = 0, keysAddress = 0x03004F30;
 	uint32_t barrierState = 0, untilScene = 0, autoConfirmScene = 0;
+    unsigned settleFrames = 0;
 	unsigned dumpWords = 32;
 	unsigned keySlots = 4, autodriveFrame = UINT_MAX, debugStepFrame = UINT_MAX;
 	bool ringMode = false, expectPoc = false, autofire = false, hle = false, barrierBeforeInput = false;
@@ -432,6 +433,7 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--trace-player") && number(value, &n) && n < 8) tracePlayer = n;
 		else if (!strcmp(option, "--trace-stop-frame") && number(value, &n) && n <= 100000) traceStopFrame = n;
 		else if (!strcmp(option, "--until-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) untilScene = n;
+        else if (!strcmp(option, "--settle-frames") && number(value, &n) && n <= 10000) settleFrames = n;
 		else if (!strcmp(option, "--auto-confirm-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) autoConfirmScene = n;
 		else if (!strcmp(option, "--barrier-state") && number(value, &n) && n >= 0x03000000 && n <= 0x03007F88) barrierState = n;
 		else if (!strcmp(option, "--trace-memory") && number(value, &n) && n < UINT32_MAX - 16) traceAddress = n;
@@ -450,7 +452,7 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--restore-frame") && number(value, &n) && n < UINT_MAX) restoreFrame = n;
 		else { fprintf(stderr, "Invalid option: %s %s\n", option, value); return 2; }
 	}
-	if (!rom || (!hle && !bios) || (hle && bios) || players < 1U || players > (ringMode ? 8U : 4U) || !frames || expectHost >= players || tracePlayer >= players || (traceStopFrame != UINT_MAX && !tracePath) || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
+	if (!rom || (!hle && !bios) || (hle && bios) || players < 1U || players > (ringMode ? 8U : 4U) || !frames || expectHost >= players || tracePlayer >= players || (traceStopFrame != UINT_MAX && !tracePath) || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (settleFrames && !untilScene) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
 		fprintf(stderr, "Usage: mgba-link --rom FILE (--bios FILE | --hle) --players 1..4 [--ring (1..8)] [--frames N] [--input CSV] [--screens PREFIX] [--watch ADDRESS] [--expect-poc]\n");
 		return 2;
 	}
@@ -589,6 +591,7 @@ int main(int argc, char** argv) {
     struct InstructionHistory { uint32_t pc, instruction, sp, lr, top; } history[1024] = {{0}};
     unsigned historyIndex = 0;
     unsigned sceneCheckFrame = UINT_MAX;
+    unsigned sceneMatchedFrame = UINT_MAX;
     bool allSceneMatch = false, snapshotFailed = false;
 	uint64_t stagnantSteps = 0;
 	uint32_t barrierRound = 0;
@@ -627,6 +630,11 @@ int main(int argc, char** argv) {
             for (unsigned i = 0; i < players; ++i)
                 if (p[i].core->busRead32(p[i].core, 0x03002E20) != untilScene ||
                     (untilWatch && p[i].core->busRead32(p[i].core, watch) != untilWatchValue)) allSceneMatch = false;
+            if (!allSceneMatch) sceneMatchedFrame = UINT_MAX;
+            else if (sceneMatchedFrame == UINT_MAX) sceneMatchedFrame = minFrame;
+            /* Scene pointers can change before their initialization runs.
+             * Allow published UI state to settle before a review snapshot. */
+            if (allSceneMatch && minFrame - sceneMatchedFrame < settleFrames) allSceneMatch = false;
         }
         if (untilScene && !allSceneMatch && minFrame >= frames) {
             fprintf(stderr, "Requested scene was not reached within the video-frame budget\n");
@@ -683,7 +691,8 @@ int main(int argc, char** argv) {
             }
             if (frame >= autodriveFrame && frame != drivenFrame[i]) {
                 drivePlayer(core, i, &routes[i], autofire, barrierState);
-                if (autoConfirmScene && core->busRead32(core, 0x03002E20) == autoConfirmScene)
+                if (autoConfirmScene && core->busRead32(core, 0x03002E20) == autoConfirmScene &&
+                    !(untilWatch && core->busRead32(core, watch) == untilWatchValue))
                     core->setKeys(core, frame % 60 < 15 ? 1 : 0);
                 drivenFrame[i] = frame;
             }
