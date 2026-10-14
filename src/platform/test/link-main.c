@@ -6,6 +6,7 @@
 #include <mgba/internal/gba/sio/lockstep.h>
 #include <mgba/internal/gba/sio/ring.h>
 #include <mgba-util/vfs.h>
+#include <mgba-util/audio-buffer.h>
 #ifdef ENABLE_DEBUGGERS
 #include <mgba/debugger/debugger.h>
 #endif
@@ -22,17 +23,31 @@ struct Player {
 	mColor pixels[240 * 160], completedPixels[240 * 160];
 	unsigned id;
 	bool asleep;
+    FILE* audio;
+    uint32_t audioFrames;
+    bool audioError;
 };
 
 static FILE* videoLog;
 static FILE* progressLog;
 static unsigned videoFrom;
+static uint32_t audioState, timingState, soundTable;
 static struct { uint32_t address; uint64_t cycles; } cycleProfile[8192];
 
 static void captureFrame(void* context) {
     struct Player* player = context;
     memcpy(player->completedPixels, player->pixels, sizeof(player->pixels));
     unsigned frame = player->core->frameCounter(player->core);
+    struct mAudioBuffer* audio = player->core->getAudioBuffer(player->core);
+    if (player->audio && frame >= videoFrom) {
+        int16_t samples[2048];
+        size_t count;
+        while ((count = mAudioBufferRead(audio, samples, 1024))) {
+            if (fwrite(samples, sizeof(int16_t) * 2, count, player->audio) != count)
+                player->audioError = true;
+            player->audioFrames += count;
+        }
+    } else mAudioBufferClear(audio);
     if (progressLog && !player->id && !(frame % 600)) {
         struct mCore* core = player->core;
         fprintf(progressLog, "%u,%u,%u,%u", frame, core->rawRead32(core, 0x03002E20, -1),
@@ -48,13 +63,14 @@ static void captureFrame(void* context) {
     if (videoLog && frame >= videoFrom) {
         struct GBA* gba = player->core->board;
         unsigned dispcnt = player->core->busRead16(player->core, 0x04000000);
-        unsigned slots[8] = {0}, active = 0, invalid = 0, markers = 0, balloonForeignPixels = 0;
+        unsigned slots[8] = {0}, active = 0, invalid = 0, markers = 0, balloonForeignPixels = 0, menuCursors = 0;
         for (unsigned i = 0; i < 128; ++i) {
             uint16_t* obj = gba->video.oam.raw + i * 4;
             if ((obj[0] & 0x300) == 0x200) continue;
             ++active;
             if ((obj[0] >> 14) == 3) ++invalid;
             unsigned tile = obj[2] & 1023;
+            if (tile >= 0x3C0 && tile < 0x3C8 && (obj[2] >> 12) == 6) menuCursors |= 1U << (tile - 0x3C0);
             if (tile >= 512) ++slots[(tile - 512) / 64];
             if (tile == 0x132 && (obj[2] >> 12) >= 8) ++markers;
             if (tile == 0x09C && (obj[2] >> 12) >= 8) {
@@ -102,6 +118,24 @@ static void captureFrame(void* context) {
                 player->core->rawRead32(player->core, 0x030066E0, -1),
                 player->core->rawRead16(player->core, 0x030066FE, -1), lap);
         fprintf(videoLog, ",%u,%u,%u,%u", skyRoadPixels, player->core->rawRead32(player->core, 0x03002E20, -1), balloonForeignPixels, player->core->rawRead32(player->core, 0x030066E4, -1));
+        fprintf(videoLog, ",%u", menuCursors);
+        if (soundTable) {
+            uint32_t sound = player->core->rawRead32(player->core, 0x03007FF0, -1);
+            fprintf(videoLog, ",%u,%u,%u,%u", gba->memory.dma[1].nextSource,
+                sound + 0x350 + 1584, player->core->rawRead8(player->core, sound + 4, -1),
+                player->core->rawRead32(player->core, sound, -1));
+            const unsigned channels[] = {1, 2, 6};
+            for (unsigned i = 0; i < 3; ++i) {
+                uint32_t info = player->core->rawRead32(player->core, soundTable + 12 * channels[i], -1);
+                uint32_t status = player->core->rawRead32(player->core, info + 4, -1);
+                fprintf(videoLog, ",%u", (status & 0xFFFF) && !(status & 0x80000000)
+                    ? player->core->rawRead32(player->core, info, -1) : 0);
+            }
+        }
+        if (timingState) for (unsigned i = 0; i < 5; ++i)
+            fprintf(videoLog, ",%u", player->core->rawRead32(player->core, timingState + i * 4, -1));
+        if (audioState) for (unsigned i = 0; i < 16; ++i)
+            fprintf(videoLog, ",%u", player->core->rawRead32(player->core, audioState + i * 4, -1));
         fputc('\n', videoLog);
     }
 }
@@ -318,6 +352,7 @@ int main(int argc, char** argv) {
 	mLogSetDefaultLogger(&logger);
 	const char *rom = NULL, *bios = NULL, *inputPath = NULL, *prefix = NULL, *tracePath = NULL, *videoPath = NULL;
 	const char* profilePath = NULL;
+    const char* audioPrefix = NULL;
 	const char* progressPath = NULL;
 	unsigned players = 0, frames = 600;
 	unsigned expectHost = 0, breakFrame = UINT_MAX, restoreFrame = UINT_MAX;
@@ -325,7 +360,7 @@ int main(int argc, char** argv) {
     bool untilWatch = false;
 	uint32_t traceAddress = 0;
 	unsigned tracePlayer = 0;
-	unsigned traceStopFrame = UINT_MAX;
+	unsigned traceStopFrame = UINT_MAX, profileUntil = UINT_MAX, profileFrom = UINT_MAX;
 	uint32_t dumpAddress = 0, keysAddress = 0x03004F30;
 	uint32_t barrierState = 0, untilScene = 0, autoConfirmScene = 0;
 	unsigned dumpWords = 32;
@@ -348,6 +383,12 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--video-log")) videoPath = value;
 		else if (!strcmp(option, "--progress-file")) progressPath = value;
 		else if (!strcmp(option, "--profile-file")) profilePath = value;
+        else if (!strcmp(option, "--audio-prefix")) audioPrefix = value;
+        else if (!strcmp(option, "--sound-table") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) soundTable = n;
+        else if (!strcmp(option, "--profile-from") && number(value, &n) && n <= 100000) profileFrom = n;
+        else if (!strcmp(option, "--timing-state") && number(value, &n) && n >= 0x02000000 && n < 0x03008000) timingState = n;
+        else if (!strcmp(option, "--profile-until") && number(value, &n) && n <= 100000) profileUntil = n;
+        else if (!strcmp(option, "--audio-state") && number(value, &n) && n >= 0x02000000 && n < 0x03008000) audioState = n;
 		else if (!strcmp(option, "--video-from") && number(value, &n) && n <= 100000) videoFrom = n;
 		else if (!strcmp(option, "--trace-file")) tracePath = value;
 		else if (!strcmp(option, "--trace-player") && number(value, &n) && n < 8) tracePlayer = n;
@@ -413,7 +454,14 @@ int main(int argc, char** argv) {
 	if (videoPath) {
 		videoLog = fopen(videoPath, "w");
 		if (!videoLog) { perror(videoPath); goto done; }
-        fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus\n");
+        fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus,menuCursors");
+        if (soundTable) fprintf(videoLog, ",fifoSource,pcmBufferEnd,pcmCounter,soundIdent,engineHeader,voiceHeader,effectHeader");
+        if (timingState) fprintf(videoLog, ",exchangeCycles,renderCycles,profileFrame,publishCycles,mixCycles");
+        if (audioState) {
+            for (unsigned i = 0; i < 11; ++i) fprintf(videoLog, ",audioStarts%u", i);
+            fprintf(videoLog, ",audioMixFrames,audioMissedFrames,audioMaxGap,audioRecoveredFrames,audioLateSegments");
+        }
+        fputc('\n', videoLog);
 	}
 	if (progressPath) {
 		progressLog = fopen(progressPath, "w");
@@ -430,11 +478,22 @@ int main(int argc, char** argv) {
 		mCoreConfigSetDefaultIntValue(&core->config, "useBios", !hle);
 		mCoreConfigSetDefaultIntValue(&core->config, "skipBios", hle);
 		mCoreConfigSetDefaultValue(&core->config, "idleOptimization", "ignore");
-		mCoreConfigSetDefaultIntValue(&core->config, "mute", true);
+		mCoreConfigSetOverrideIntValue(&core->config, "mute", false);
+        mCoreConfigSetOverrideIntValue(&core->config, "volume", 0x100);
 		mCoreLoadConfig(core);
 		core->opts.useBios = !hle;
 		core->opts.skipBios = hle;
 		core->setVideoBuffer(core, p[i].pixels, 240);
+        if (audioPrefix) {
+            char path[PATH_MAX];
+            if (snprintf(path, sizeof(path), "%s-%u.wav", audioPrefix, i) >= (int)sizeof(path)) {
+                fprintf(stderr, "Audio path too long\n"); goto done;
+            }
+            p[i].audio = fopen(path, "wb+");
+            if (!p[i].audio) { perror(path); goto done; }
+            uint8_t blank[44] = {0};
+            if (fwrite(blank, 1, sizeof(blank), p[i].audio) != sizeof(blank)) goto done;
+        }
         struct mCoreCallbacks callbacks = { .context = &p[i], .videoFrameEnded = captureFrame };
         core->addCoreCallbacks(core, &callbacks);
 		if (!hle) {
@@ -487,8 +546,6 @@ int main(int argc, char** argv) {
 #endif
 	/* Input rows affect only the hardware keypad. The ring scheduling event
      * bounds even BIOS HALT intervals to 256 cycles; stock sleep/wake is respected. */
-	bool* applied = calloc(nInputs ? nInputs : 1, sizeof(*applied));
-	if (!applied) goto done;
 	uint64_t steps = 0;
 	unsigned lastMinFrame = 0;
     struct InstructionHistory { uint32_t pc, instruction, sp, lr, top; } history[1024] = {{0}};
@@ -501,6 +558,7 @@ int main(int argc, char** argv) {
 	bool frozen[GBA_RING_MAX_PLAYERS] = { false };
     struct Route routes[GBA_RING_MAX_PLAYERS] = {0};
     unsigned drivenFrame[GBA_RING_MAX_PLAYERS] = {0};
+    size_t inputNext[GBA_RING_MAX_PLAYERS] = {0};
 	for (;;) {
         if (emulationErrors) {
 #ifdef ENABLE_DEBUGGERS
@@ -508,7 +566,7 @@ int main(int argc, char** argv) {
             else
 #endif
             fprintf(stderr, "Emulator reported an error; stopping the run\n");
-            free(applied); goto done;
+            goto done;
         }
 		int selected = -1;
 		uint64_t earliest = UINT64_MAX;
@@ -559,7 +617,6 @@ int main(int argc, char** argv) {
 				snapshotFailed = true;
 				break;
 			}
-			free(applied);
 			goto done;
 		}
 		for (unsigned i = 0; i < players; ++i) {
@@ -575,12 +632,17 @@ int main(int argc, char** argv) {
 					frozen[i] |= core->busRead8(core, barrierState + 144) || nextInput;
 			}
 			if (barrierState ? !frozen[i] : frame < frames) complete = false;
-			for (size_t e = 0; e < nInputs; ++e) {
-				if (!applied[e] && inputs[e].player == i && frame >= inputs[e].frame) {
-					core->setKeys(core, inputs[e].keys);
-					applied[e] = true;
-				}
-			}
+            /* CSV frames are sorted. Each console only needs to scan new
+             * rows up to its current video frame, not the whole recording
+             * on every CPU scheduling quantum. Preserve same-frame order. */
+            while (inputNext[i] < nInputs) {
+                size_t e = inputNext[i];
+                if (inputs[e].frame > frame) break;
+                ++inputNext[i];
+                if (inputs[e].player == i) {
+                    core->setKeys(core, inputs[e].keys);
+                }
+            }
             if (frame >= autodriveFrame && frame != drivenFrame[i]) {
                 drivePlayer(core, i, &routes[i], autofire);
                 if (autoConfirmScene && core->busRead32(core, 0x03002E20) == autoConfirmScene)
@@ -593,11 +655,12 @@ int main(int argc, char** argv) {
 		}
 		if (complete) break;
 		if (selected < 0 || ++steps > (uint64_t) frames * players * 400000) {
-			fprintf(stderr, "Link deadlock or instruction budget exhausted\n"); free(applied); goto done;
+			fprintf(stderr, "Link deadlock or instruction budget exhausted\n"); goto done;
 		}
 		bool profiling = profilePath && selected == (int)tracePlayer &&
-		                 p[selected].core->frameCounter(p[selected].core) >= videoFrom &&
-		                 p[selected].core->frameCounter(p[selected].core) < frames;
+		                 p[selected].core->frameCounter(p[selected].core) >= (profileFrom == UINT_MAX ? videoFrom : profileFrom) &&
+		                 p[selected].core->frameCounter(p[selected].core) < frames &&
+                         p[selected].core->frameCounter(p[selected].core) < profileUntil;
 		uint64_t profileTime = profiling ? mTimingGlobalTime(p[selected].core->timing) : 0;
 		int32_t profilePc = 0;
 		if (profiling) p[selected].core->readRegister(p[selected].core, "pc", &profilePc);
@@ -616,13 +679,13 @@ int main(int argc, char** argv) {
                     fprintf(stderr, "History %08x ins=%08x sp=%08x lr=%08x top=%08x\n", history[index].pc, history[index].instruction, history[index].sp, history[index].lr, history[index].top);
                 }
                 fprintf(stderr, "Invalid stack at frame %u\n", traced->frameCounter(traced));
-                free(applied); goto done;
+                goto done;
             }
             mDebuggerRun(&debugger);
         }
         else
 #endif
-		    if (barrierBeforeInput && barrierRound) {
+		    if (profiling || (barrierBeforeInput && barrierRound)) {
 		        /* The pre-input marker lasts only a few instructions. Keep
 		         * coarse scheduling for the run and step precisely at its end. */
 		        p[selected].core->step(p[selected].core);
@@ -636,7 +699,6 @@ int main(int argc, char** argv) {
 			while (cycleProfile[index].address && cycleProfile[index].address != key) {
 				if (++probes == 8192) {
 					fprintf(stderr, "CPU profile exceeded 8192 distinct PC ranges\n");
-					free(applied);
 					goto done;
 				}
 				index = (index + 1) & 8191;
@@ -645,7 +707,6 @@ int main(int argc, char** argv) {
 			cycleProfile[index].cycles += mTimingGlobalTime(p[selected].core->timing) - profileTime;
 		}
 	}
-	free(applied);
 	if (profilePath) {
 		FILE* profile = fopen(profilePath, "w");
 		if (!profile) { perror(profilePath); goto done; }
@@ -814,6 +875,19 @@ done:
 	if (videoLog && fclose(videoLog)) result = 1;
 	if (progressLog && fclose(progressLog)) result = 1;
 	for (unsigned i = 0; i < initialized; ++i) {
+        if (p[i].audio) {
+            uint32_t bytes = p[i].audioFrames * 4;
+            unsigned rate = p[i].core->audioSampleRate(p[i].core);
+            uint8_t header[44] = {0};
+            memcpy(header, "RIFF", 4); memcpy(header + 8, "WAVEfmt ", 8);
+            memcpy(header + 36, "data", 4);
+            STORE_32LE(bytes + 36, 4, header); STORE_32LE(16, 16, header);
+            STORE_16LE(1, 20, header); STORE_16LE(2, 22, header);
+            STORE_32LE(rate, 24, header); STORE_32LE(rate * 4, 28, header);
+            STORE_16LE(4, 32, header); STORE_16LE(16, 34, header); STORE_32LE(bytes, 40, header);
+            if (fseek(p[i].audio, 0, SEEK_SET) || fwrite(header, 1, 44, p[i].audio) != 44 || p[i].audioError) result = 1;
+            if (fclose(p[i].audio)) result = 1;
+        }
 		if (ringMode) mTimingDeschedule(p[i].core->timing, &p[i].quantum);
 		if (ringMode && p[i].ring.ring) GBASIORingDetach(&p[i].ring);
 		mCoreConfigDeinit(&p[i].core->config);
