@@ -114,9 +114,12 @@ value on every core, useful for cumulative results. Failed scene/barrier waits
 still emit diagnostic JSON and screenshots and return a nonzero exit status.
 
 `--autodrive-frame N` observes the native AMKE route and local driver's heading
-and sends keypad steering after frame N. Large heading errors use A+B quick
-turning. After 120 frames without movement through a checkpoint, the controller
-revisits its current route point to recover from an obstacle before continuing. `--autofire` periodically presses L. These helpers never modify race
+and sends keypad steering after frame N. Large heading errors use A+B with R
+for a quick turn. Every 120 frames the controller checks actual movement,
+including when a stationary kart alternates checkpoint zones. It revisits the
+current route point and, if that is blocked, preceding waypoints until it can
+continue. `--autofire` periodically presses L. Driving keys are released in
+ring results; only `--auto-confirm-scene` advances that menu. These helpers never modify race
 RAM, and are ROM-specific test controllers rather than emulator features for
 arbitrary games. Emulator errors stop the run and fail it. Optional
 `--debug-step-frame N` supports instruction-level failure diagnosis.
@@ -136,12 +139,13 @@ the full video log it does not scan graphics, so long-cup progress can be read
 while the run continues. `game.finishLap` reports the native encoded lap target
 (0x83 for three laps, 0x85 for five).
 
-`--profile-file PATH` groups instruction-step cycle costs into PC ranges on
+`--profile-file PATH` records instruction-step cycle costs by instruction PC on
 `--trace-player`. The measured interval starts at `--video-from`, or an explicit
 `--profile-from`, and ends at `--profile-until` (the requested frame threshold
 by default). Only that console uses instruction stepping during the interval;
 the other consoles continue with normal scheduling. Interrupts and DMA remain
-part of the measured workload. Follow a profile with a run without profiling
+part of the measured workload. ARM/Thumb prefetch is accounted for when
+identifying the executed instruction. Follow a profile with a run without profiling
 when checking timing-sensitive behavior. Palette, native HUD/minimap tiles, and balloon palette counts are also
 available in game diagnostics.
 
@@ -171,7 +175,7 @@ for finish banners. This supports checking native tied ranks and score reuse.
 to `PREFIX-N.wav`, overriding saved mute/volume settings for repeatable capture.
 Audio buffers are drained each frame even without recording, so a headless
 consumer cannot fill the host-side queue. `--sound-table ADDRESS` observes the
-AMKE mixer table: active local engine, voice and effect song headers, plus FIFO
+AMKE mixer table: local/camera player IDs, active local engine, voice and effect song headers, plus FIFO
 DMA source/buffer-end addresses. `--audio-state ADDRESS` reads the ring ROM's
 16 diagnostic counters: eleven accepted mixer-player starts, service count,
 missed services, longest gap, recovered PCM segments and late PCM segments.
