@@ -136,10 +136,13 @@ the full video log it does not scan graphics, so long-cup progress can be read
 while the run continues. `game.finishLap` reports the native encoded lap target
 (0x83 for three laps, 0x85 for five).
 
-`--profile-file PATH` records sampled PC ranges and elapsed emulated CPU cycles
-on `--trace-player` from `--video-from` until the requested frame threshold.
-It is a sampling profile, including interrupts and DMA encountered in each
-slice. Palette, native HUD/minimap tiles, and balloon palette counts are also
+`--profile-file PATH` groups instruction-step cycle costs into PC ranges on
+`--trace-player`. The measured interval starts at `--video-from`, or an explicit
+`--profile-from`, and ends at `--profile-until` (the requested frame threshold
+by default). Only that console uses instruction stepping during the interval;
+the other consoles continue with normal scheduling. Interrupts and DMA remain
+part of the measured workload. Follow a profile with a run without profiling
+when checking timing-sensitive behavior. Palette, native HUD/minimap tiles, and balloon palette counts are also
 available in game diagnostics.
 
 Ring transfer completion defers the owner's IRQ until all receivers' events
@@ -163,3 +166,21 @@ JSON game snapshots expose each driver's native GP `points` and all eight
 The standings view is meaningful in the native or ring GP results scene,
 after its original eight-racer builder has run; race scenes reuse that memory
 for finish banners. This supports checking native tied ranks and score reuse.
+
+`--audio-prefix PREFIX` records each console's stereo PCM from `--video-from`
+to `PREFIX-N.wav`, overriding saved mute/volume settings for repeatable capture.
+Audio buffers are drained each frame even without recording, so a headless
+consumer cannot fill the host-side queue. `--sound-table ADDRESS` observes the
+AMKE mixer table: active local engine, voice and effect song headers, plus FIFO
+DMA source/buffer-end addresses. `--audio-state ADDRESS` reads the ring ROM's
+16 diagnostic counters: eleven accepted mixer-player starts, service count,
+missed services, longest gap, recovered PCM segments and late PCM segments.
+These distinguish recoverable service delays from an actual playback deadline
+miss. `--timing-state ADDRESS` observes its exchange/render/publication/mixing cycle counts and their video-frame
+index. The cycle counts are inclusive; nested counters should not be added
+to estimate total work.
+
+The CSV reader advances one input cursor per console while preserving sorted
+row order and held-key semantics. Long recordings therefore cost only the new
+rows at each frame boundary rather than rescanning the full recording at every
+CPU scheduling quantum.
