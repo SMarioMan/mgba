@@ -32,7 +32,7 @@ static FILE* videoLog;
 static FILE* progressLog;
 static unsigned videoFrom;
 static uint32_t audioState, timingState, soundTable;
-static struct { uint32_t address; uint64_t cycles; } cycleProfile[8192];
+static struct { uint32_t address; uint64_t cycles; } cycleProfile[32768];
 
 static void captureFrame(void* context) {
     struct Player* player = context;
@@ -120,6 +120,10 @@ static void captureFrame(void* context) {
         fprintf(videoLog, ",%u,%u,%u,%u", skyRoadPixels, player->core->rawRead32(player->core, 0x03002E20, -1), balloonForeignPixels, player->core->rawRead32(player->core, 0x030066E4, -1));
         fprintf(videoLog, ",%u", menuCursors);
         if (soundTable) {
+            uint32_t camera = player->core->rawRead32(player->core, 0x03003658, -1);
+            bool validCamera = (camera >= 0x02000000 && camera < 0x0203FE00) || (camera >= 0x03000000 && camera < 0x03007E00);
+            fprintf(videoLog, ",%u,%u", player->core->rawRead8(player->core, 0x0300361C, -1),
+                validCamera ? player->core->rawRead8(player->core, camera + 0xEC, -1) : 255);
             uint32_t sound = player->core->rawRead32(player->core, 0x03007FF0, -1);
             fprintf(videoLog, ",%u,%u,%u,%u", gba->memory.dma[1].nextSource,
                 sound + 0x350 + 1584, player->core->rawRead8(player->core, sound + 4, -1),
@@ -248,15 +252,22 @@ struct Route {
     int x[128], y[128], count[128];
     unsigned checkpoints, headerIndex;
     uint32_t track;
-    unsigned lastCheckpoint, motionFrame;
+    unsigned lastCheckpoint, motionFrame, retreatCheckpoint;
     int motionX, motionY;
-    bool recovering;
+    bool recovering, retreating;
     bool inMenu;
 };
 
 /* A test driver sends only keypad input. It observes the native checkpoint
  * route and kart heading, and never changes race RAM or human/CPU flags. */
-static void drivePlayer(struct mCore* core, unsigned slot, struct Route* route, bool autofire) {
+static void drivePlayer(struct mCore* core, unsigned slot, struct Route* route, bool autofire, uint32_t ringState) {
+    if (ringState && !core->busRead8(core, ringState + 117)) {
+        /* Results retain the old race-state bytes. Stop the driving keys;
+         * only the explicit auto-confirm-scene option may advance menus. */
+        core->setKeys(core, 0);
+        route->checkpoints = 0;
+        return;
+    }
     unsigned videoMode = core->busRead16(core, 0x04000000) & 7;
     if (videoMode == 3 || videoMode == 4) {
         if (!route->inMenu) {
@@ -293,6 +304,7 @@ static void drivePlayer(struct mCore* core, unsigned slot, struct Route* route, 
         route->track = track;
         route->headerIndex = headerIndex;
         route->motionFrame = 0;
+        route->retreating = false;
         route->recovering = false;
         for (unsigned cp = 0; cp < n; ++cp) {
             route->x[cp] = core->busRead16(core, points + cp * 8) * 8;
@@ -304,23 +316,49 @@ static void drivePlayer(struct mCore* core, unsigned slot, struct Route* route, 
     int x = (int32_t) core->busRead32(core, driver) >> 16;
     int y = (int32_t) core->busRead32(core, driver + 4) >> 16;
     unsigned frame = core->frameCounter(core);
-    if (!route->motionFrame || cp != route->lastCheckpoint) {
+    if (!route->motionFrame) {
         route->lastCheckpoint = cp;
         route->motionFrame = frame;
         route->motionX = x; route->motionY = y;
-        route->recovering = false;
+    } else if (cp != route->lastCheckpoint) {
+        int dx = x - route->motionX, dy = y - route->motionY;
+        route->lastCheckpoint = cp;
+        /* A kart pressed against a checkpoint boundary can alternate zones
+         * without moving. Only actual progress clears obstacle recovery. */
+        if (!route->retreating && (int64_t) dx * dx + (int64_t) dy * dy >= 144)
+            route->recovering = false;
     }
     if (frame - route->motionFrame >= 120) {
         int dx = x - route->motionX, dy = y - route->motionY;
         /* An early turn can cut a corner into a tree or pipe. Revisit the
          * current route point instead of accelerating into that obstacle
          * indefinitely. This is keypad steering, not a game-state write. */
-        if ((int64_t) dx * dx + (int64_t) dy * dy < 144) route->recovering = true;
+        if ((int64_t) dx * dx + (int64_t) dy * dy < 144) {
+            /* If returning to this waypoint is blocked too, revisit the
+             * preceding road waypoint. Keep that target across checkpoint
+             * boundary changes until it is reached, avoiding a grass/water
+             * shortcut back into the same obstacle. */
+            if (route->recovering) {
+                route->retreatCheckpoint = ((route->retreating ? route->retreatCheckpoint : cp)
+                                            + route->checkpoints - 1) % route->checkpoints;
+                route->retreating = true;
+            }
+            route->recovering = true;
+        }
         route->motionFrame = frame;
         route->motionX = x; route->motionY = y;
     }
-    unsigned target = (route->recovering ? cp : cp + 1) % route->checkpoints;
-    if (route->recovering) {
+    unsigned target = route->retreating ? route->retreatCheckpoint :
+                      (route->recovering ? cp : cp + 1) % route->checkpoints;
+    if (route->retreating) {
+        int dx = route->x[target] - x, dy = route->y[target] - y;
+        if ((int64_t) dx * dx + (int64_t) dy * dy < 576) {
+            route->retreating = route->recovering = false;
+            route->motionFrame = frame;
+            route->motionX = x; route->motionY = y;
+            target = (cp + 1) % route->checkpoints;
+        }
+    } else if (route->recovering) {
         int dx = route->x[target] - x, dy = route->y[target] - y;
         if ((int64_t) dx * dx + (int64_t) dy * dy < 576) {
             route->recovering = false;
@@ -333,7 +371,7 @@ static void drivePlayer(struct mCore* core, unsigned slot, struct Route* route, 
     double direction = atan2(route->x[target] - x, y - route->y[target]);
     int desired = (int) (direction * 65536.0 / (2 * 3.141592653589793));
     int16_t error = desired - core->busRead16(core, driver + 0x7C);
-    unsigned keys = abs(error) > 8000 ? 3 : 1;
+    unsigned keys = abs(error) > 8000 ? (3 | 256) : 1;
     if (error > 700) keys |= 16;
     if (error < -700) keys |= 32;
     if (autofire && core->frameCounter(core) % 120 == 0) keys |= 512;
@@ -455,7 +493,7 @@ int main(int argc, char** argv) {
 		videoLog = fopen(videoPath, "w");
 		if (!videoLog) { perror(videoPath); goto done; }
         fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus,menuCursors");
-        if (soundTable) fprintf(videoLog, ",fifoSource,pcmBufferEnd,pcmCounter,soundIdent,engineHeader,voiceHeader,effectHeader");
+        if (soundTable) fprintf(videoLog, ",localPlayer,cameraPlayer,fifoSource,pcmBufferEnd,pcmCounter,soundIdent,engineHeader,voiceHeader,effectHeader");
         if (timingState) fprintf(videoLog, ",exchangeCycles,renderCycles,profileFrame,publishCycles,mixCycles");
         if (audioState) {
             for (unsigned i = 0; i < 11; ++i) fprintf(videoLog, ",audioStarts%u", i);
@@ -644,7 +682,7 @@ int main(int argc, char** argv) {
                 }
             }
             if (frame >= autodriveFrame && frame != drivenFrame[i]) {
-                drivePlayer(core, i, &routes[i], autofire);
+                drivePlayer(core, i, &routes[i], autofire, barrierState);
                 if (autoConfirmScene && core->busRead32(core, 0x03002E20) == autoConfirmScene)
                     core->setKeys(core, frame % 60 < 15 ? 1 : 0);
                 drivenFrame[i] = frame;
@@ -663,7 +701,11 @@ int main(int argc, char** argv) {
                          p[selected].core->frameCounter(p[selected].core) < profileUntil;
 		uint64_t profileTime = profiling ? mTimingGlobalTime(p[selected].core->timing) : 0;
 		int32_t profilePc = 0;
-		if (profiling) p[selected].core->readRegister(p[selected].core, "pc", &profilePc);
+		if (profiling) {
+            struct ARMCore* cpu = p[selected].core->cpu;
+            /* PC contains the second prefetched instruction before a step. */
+            profilePc = cpu->gprs[ARM_PC] - (cpu->executionMode == MODE_THUMB ? 2 : 4);
+        }
 #ifdef ENABLE_DEBUGGERS
         if (selected == (int) tracePlayer && debuggerAttached && p[tracePlayer].core->frameCounter(p[tracePlayer].core) >= debugStepFrame)
             {
@@ -693,15 +735,15 @@ int main(int argc, char** argv) {
 		        p[selected].core->runLoop(p[selected].core);
 		    }
 		if (profiling) {
-			uint32_t key = ((uint32_t)profilePc & ~63U) + 1;
-			unsigned index = (key >> 6) & 8191;
+			uint32_t key = ((uint32_t)profilePc & ~1U) + 1;
+			unsigned index = (key >> 1) & 32767;
 			unsigned probes = 0;
 			while (cycleProfile[index].address && cycleProfile[index].address != key) {
-				if (++probes == 8192) {
-					fprintf(stderr, "CPU profile exceeded 8192 distinct PC ranges\n");
+				if (++probes == 32768) {
+					fprintf(stderr, "CPU profile exceeded 32768 distinct instruction addresses\n");
 					goto done;
 				}
-				index = (index + 1) & 8191;
+				index = (index + 1) & 32767;
 			}
 			cycleProfile[index].address = key;
 			cycleProfile[index].cycles += mTimingGlobalTime(p[selected].core->timing) - profileTime;
@@ -711,7 +753,7 @@ int main(int argc, char** argv) {
 		FILE* profile = fopen(profilePath, "w");
 		if (!profile) { perror(profilePath); goto done; }
 		fprintf(profile, "pc,cycles\n");
-		for (unsigned i = 0; i < 8192; ++i) if (cycleProfile[i].address)
+		for (unsigned i = 0; i < 32768; ++i) if (cycleProfile[i].address)
 			fprintf(profile, "%08x,%" PRIu64 "\n", cycleProfile[i].address - 1, cycleProfile[i].cycles);
 		fclose(profile);
 	}
