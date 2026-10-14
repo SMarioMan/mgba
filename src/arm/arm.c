@@ -253,6 +253,21 @@ void ARMRunLoop(struct ARMCore* cpu) {
 	cpu->irqh.processEvents(cpu);
 }
 
+void ARMRunLoopWithHook(struct ARMCore* cpu, void (*hook)(struct ARMCore*, void*), void* context) {
+	if (cpu->executionMode == MODE_THUMB) {
+		while (cpu->cycles < cpu->nextEvent) {
+			hook(cpu, context);
+			ThumbStep(cpu);
+		}
+	} else {
+		while (cpu->cycles < cpu->nextEvent) {
+			hook(cpu, context);
+			ARMStep(cpu);
+		}
+	}
+	cpu->irqh.processEvents(cpu);
+}
+
 void ARMRunFake(struct ARMCore* cpu, uint32_t opcode) {
 	if (cpu->executionMode == MODE_ARM) {
 		cpu->gprs[ARM_PC] -= WORD_SIZE_ARM;
