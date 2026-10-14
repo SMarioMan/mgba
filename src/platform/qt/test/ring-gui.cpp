@@ -35,6 +35,7 @@ struct Inputs {
     unsigned firstSimulation = 0, lastSimulation = 0, speedStartFrame = 0;
     unsigned minSpeedFrame = 0;
     bool measureSpeed = false, deferMotion = false, speedComplete = false;
+    unsigned motionFrame = 3500;
 	static void frame(void* context) {
 		Inputs* inputs = static_cast<Inputs*>(context);
 		mCore* core = inputs->controller->thread()->core;
@@ -57,7 +58,7 @@ struct Inputs {
 		while (inputs->next < inputs->events.size() && inputs->events[inputs->next].first <= frame) {
             // Keep Battle stationary through the speed window; an eliminated
             // round's frozen counter must never be mistaken for half-speed.
-            if (inputs->deferMotion && !inputs->speedComplete && inputs->events[inputs->next].first >= 3500) break;
+            if (inputs->deferMotion && !inputs->speedComplete && inputs->events[inputs->next].first >= inputs->motionFrame) break;
 			unsigned keys = inputs->events[inputs->next++].second;
             if (inputs->keyboardWindow) {
                 unsigned previous = inputs->held;
@@ -324,7 +325,9 @@ private slots:
 			unsigned frame = columns[0].toUInt();
 			// Enter the first console's title menu normally before waiting; a
 			// delayed initial Start would confirm the default Single Player item.
-			inputs[slot].events.append(qMakePair(frame + (lateBoot && !slot && frame > 715 ? 760 : 0), columns[2].toUInt(nullptr, 16)));
+            unsigned shiftedFrame = frame + (lateBoot && !slot && frame > 715 ? 760 : 0);
+            if (frame == 3500) inputs[slot].motionFrame = shiftedFrame;
+			inputs[slot].events.append(qMakePair(shiftedFrame, columns[2].toUInt(nullptr, 16)));
 		}
 		QList<Window*> windows;
 		for (int i = 0; i < players; ++i) {
@@ -355,6 +358,7 @@ private slots:
 				unsigned bootFrames = controller->thread()->core->frameCounter(controller->thread()->core);
 				QVERIFY(bootFrames >= 760);
 				for (auto& event : inputs[0].events) if (event.first > 715) event.first += bootFrames - 760;
+                inputs[0].motionFrame += bootFrames - 760;
 			}
 		}
 		QCOMPARE(app->multiplayer()->attached(), players);
