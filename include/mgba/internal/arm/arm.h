@@ -210,6 +210,9 @@ void ARMRaiseUndefined(struct ARMCore*);
 
 void ARMRun(struct ARMCore* cpu);
 void ARMRunLoop(struct ARMCore* cpu);
+/* Run to the same event boundary as ARMRunLoop. The hook observes each
+ * instruction before execution and must not modify CPU state. */
+void ARMRunLoopWithHook(struct ARMCore* cpu, void (*hook)(struct ARMCore*, void*), void* context);
 void ARMRunFake(struct ARMCore* cpu, uint32_t opcode);
 
 CXX_GUARD_END

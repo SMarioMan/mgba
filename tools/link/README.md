@@ -143,11 +143,14 @@ the full video log it does not scan graphics, so long-cup progress can be read
 while the run continues. `game.finishLap` reports the native encoded lap target
 (0x83 for three laps, 0x85 for five).
 
-`--profile-file PATH` records instruction-step cycle costs by instruction PC on
+`--profile-file PATH` records cycle costs by instruction PC on
 `--trace-player`. The measured interval starts at `--video-from`, or an explicit
 `--profile-from`, and ends at `--profile-until` (the requested frame threshold
-by default). Only that console uses instruction stepping during the interval;
-the other consoles continue with normal scheduling. Interrupts and DMA remain
+by default). An instruction observer runs inside that console's normal run-loop
+quantum; profiling preserves the same yield points and serial event delivery.
+The result records `profileScheduling: "quantum"`. Older captures that stepped
+one console independently must be recaptured for performance comparisons.
+Interrupts and DMA remain
 part of the measured workload. ARM/Thumb prefetch is accounted for when
 identifying the executed instruction. Follow a profile with a run without profiling
 when checking timing-sensitive behavior. Palette, native HUD/minimap tiles, and balloon palette counts are also

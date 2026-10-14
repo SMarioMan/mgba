@@ -34,6 +34,35 @@ static unsigned videoFrom;
 static uint32_t audioState, timingState, soundTable;
 static struct { uint32_t address; uint64_t cycles; } cycleProfile[32768];
 
+struct InstructionProfile {
+    struct mCore* core;
+    uint64_t time;
+    uint32_t pc;
+    bool pending, overflow;
+};
+
+static void flushInstructionProfile(struct InstructionProfile* profile) {
+    if (!profile->pending) return;
+    uint32_t key = (profile->pc & ~1U) + 1;
+    unsigned index = (key >> 1) & 32767, probes = 0;
+    while (cycleProfile[index].address && cycleProfile[index].address != key) {
+        if (++probes == 32768) { profile->overflow = true; return; }
+        index = (index + 1) & 32767;
+    }
+    cycleProfile[index].address = key;
+    cycleProfile[index].cycles += mTimingGlobalTime(profile->core->timing) - profile->time;
+    profile->pending = false;
+}
+
+static void profileInstruction(struct ARMCore* cpu, void* context) {
+    struct InstructionProfile* profile = context;
+    flushInstructionProfile(profile);
+    /* PC contains the second prefetched instruction. */
+    profile->pc = cpu->gprs[ARM_PC] - (cpu->executionMode == MODE_THUMB ? 2 : 4);
+    profile->time = mTimingGlobalTime(profile->core->timing);
+    profile->pending = true;
+}
+
 static void captureFrame(void* context) {
     struct Player* player = context;
     memcpy(player->completedPixels, player->pixels, sizeof(player->pixels));
@@ -708,13 +737,7 @@ int main(int argc, char** argv) {
 		                 p[selected].core->frameCounter(p[selected].core) >= (profileFrom == UINT_MAX ? videoFrom : profileFrom) &&
 		                 p[selected].core->frameCounter(p[selected].core) < frames &&
                          p[selected].core->frameCounter(p[selected].core) < profileUntil;
-		uint64_t profileTime = profiling ? mTimingGlobalTime(p[selected].core->timing) : 0;
-		int32_t profilePc = 0;
-		if (profiling) {
-            struct ARMCore* cpu = p[selected].core->cpu;
-            /* PC contains the second prefetched instruction before a step. */
-            profilePc = cpu->gprs[ARM_PC] - (cpu->executionMode == MODE_THUMB ? 2 : 4);
-        }
+		struct InstructionProfile instructionProfile = { .core = p[selected].core };
 #ifdef ENABLE_DEBUGGERS
         if (selected == (int) tracePlayer && debuggerAttached && p[tracePlayer].core->frameCounter(p[tracePlayer].core) >= debugStepFrame)
             {
@@ -732,30 +755,30 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "Invalid stack at frame %u\n", traced->frameCounter(traced));
                 goto done;
             }
+            if (profiling) profileInstruction(traced->cpu, &instructionProfile);
             mDebuggerRun(&debugger);
         }
         else
 #endif
-		    if (profiling || (barrierBeforeInput && barrierRound)) {
+		    if (barrierBeforeInput && barrierRound) {
 		        /* The pre-input marker lasts only a few instructions. Keep
 		         * coarse scheduling for the run and step precisely at its end. */
+		        if (profiling) profileInstruction(p[selected].core->cpu, &instructionProfile);
 		        p[selected].core->step(p[selected].core);
+		    } else if (profiling) {
+		        /* Observe instructions inside the normal scheduling quantum.
+		         * Yielding one console after every instruction changes relative
+		         * serial IRQ delivery and perturbs the workload being measured. */
+		        ARMRunLoopWithHook(p[selected].core->cpu, profileInstruction, &instructionProfile);
 		    } else {
 		        p[selected].core->runLoop(p[selected].core);
 		    }
 		if (profiling) {
-			uint32_t key = ((uint32_t)profilePc & ~1U) + 1;
-			unsigned index = (key >> 1) & 32767;
-			unsigned probes = 0;
-			while (cycleProfile[index].address && cycleProfile[index].address != key) {
-				if (++probes == 32768) {
-					fprintf(stderr, "CPU profile exceeded 32768 distinct instruction addresses\n");
-					goto done;
-				}
-				index = (index + 1) & 32767;
+			flushInstructionProfile(&instructionProfile);
+			if (instructionProfile.overflow) {
+				fprintf(stderr, "CPU profile exceeded 32768 distinct instruction addresses\n");
+				goto done;
 			}
-			cycleProfile[index].address = key;
-			cycleProfile[index].cycles += mTimingGlobalTime(p[selected].core->timing) - profileTime;
 		}
 	}
 	if (profilePath) {
@@ -767,7 +790,7 @@ int main(int argc, char** argv) {
 		fclose(profile);
 	}
 	result = snapshotFailed || (untilScene && !allSceneMatch) ? 1 : 0;
-	printf("{\"bios\":\"%s\",\"topology\":\"%s\",\"players\":%u,\"frames\":%u,\"steps\":%llu,\"transfers\":%llu,\"missedReceivers\":%llu,\"collisions\":%llu,\"nodes\":[", hle ? "hle" : "real", ringMode ? "ring" : "stock", players, frames, (unsigned long long) steps, (unsigned long long) ring.transfers, (unsigned long long) ring.missedReceivers, (unsigned long long) ring.collisions);
+	printf("{\"bios\":\"%s\",\"topology\":\"%s\",\"profileScheduling\":\"%s\",\"players\":%u,\"frames\":%u,\"steps\":%llu,\"transfers\":%llu,\"missedReceivers\":%llu,\"collisions\":%llu,\"nodes\":[", hle ? "hle" : "real", ringMode ? "ring" : "stock", profilePath ? "quantum" : "none", players, frames, (unsigned long long) steps, (unsigned long long) ring.transfers, (unsigned long long) ring.missedReceivers, (unsigned long long) ring.collisions);
 	for (unsigned i = 0; i < players; ++i) {
 		struct mCore* core = p[i].core;
 		int32_t pc = 0;
