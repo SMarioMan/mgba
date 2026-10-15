@@ -56,6 +56,7 @@ public:
 	virtual ~Window();
 
 	std::shared_ptr<CoreController> controller() { return m_controller; }
+	AudioProcessor* audioProcessor() const { return m_audioProcessor.get(); }
 
 	void setConfig(ConfigController*);
 	ConfigController* config() { return m_config; }

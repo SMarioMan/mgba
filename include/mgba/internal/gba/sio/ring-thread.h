@@ -14,6 +14,8 @@ struct GBASIORingThreadNode {
 	struct GBASIORingThreadCoordinator* coordinator;
 	struct mCoreThread* thread;
 	struct mTimingEvent quantum;
+	int64_t clock;
+	unsigned interval;
 };
 
 /* Execute bounded core iterations exclusively, in shared timestamp order.
@@ -27,6 +29,7 @@ struct GBASIORingThreadCoordinator {
 	unsigned interval;
 };
 
+bool GBASIORingThreadIsAttached(const struct mCoreThread*);
 void GBASIORingThreadInit(struct GBASIORingThreadCoordinator*);
 void GBASIORingThreadDeinit(struct GBASIORingThreadCoordinator*);
 bool GBASIORingThreadAttach(struct GBASIORingThreadCoordinator*, struct GBASIORingThreadNode*, struct mCoreThread*);

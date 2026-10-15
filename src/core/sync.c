@@ -22,6 +22,7 @@ static void _changeVideoSync(struct mCoreSync* sync, bool wait) {
 
 void mCoreSyncLoadCoreOpts(struct mCoreSync* sync, const struct mCoreOptions* opts) {
 	sync->deferWait = false;
+	sync->externalPacing = false;
 	sync->audioWait = opts->audioSync;
 	sync->videoFrameWait = opts->videoSync;
 	if (opts->fpsTarget) {
@@ -41,10 +42,10 @@ void mCoreSyncPostFrame(struct mCoreSync* sync) {
 	++sync->videoFramePending;
 	do {
 		ConditionWake(&sync->videoFrameAvailableCond);
-		if (sync->videoFrameWait && !sync->deferWait) {
+		if (sync->videoFrameWait && !sync->deferWait && !sync->externalPacing) {
 			ConditionWait(&sync->videoFrameRequiredCond, &sync->videoFrameMutex);
 		}
-	} while (sync->videoFrameWait && !sync->deferWait && sync->videoFramePending);
+	} while (sync->videoFrameWait && !sync->deferWait && !sync->externalPacing && sync->videoFramePending);
 	MutexUnlock(&sync->videoFrameMutex);
 }
 
@@ -103,7 +104,7 @@ bool mCoreSyncProduceAudio(struct mCoreSync* sync, const struct mAudioBuffer* bu
 
 	size_t produced = mAudioBufferCapacity(buf);
 	size_t producedNew = mAudioBufferAvailable(buf);
-	while (sync->audioWait && !sync->deferWait && sync->audioHighWater && producedNew >= sync->audioHighWater) {
+	while (sync->audioWait && !sync->deferWait && !sync->externalPacing && sync->audioHighWater && producedNew >= sync->audioHighWater) {
 		ConditionWait(&sync->audioRequiredCond, &sync->audioBufferMutex);
 		produced = producedNew;
 		producedNew = mAudioBufferAvailable(buf);
@@ -139,11 +140,22 @@ void mCoreSyncConsumeAudio(struct mCoreSync* sync) {
 
 void mCoreSyncWaitDeferred(struct mCoreSync* sync, const struct mAudioBuffer* buffer) {
 	MutexLock(&sync->videoFrameMutex);
-	while (sync->videoFrameWait && sync->videoFramePending) {
+	while (sync->videoFrameWait && !sync->externalPacing && sync->videoFramePending) {
 		ConditionWake(&sync->videoFrameAvailableCond);
 		ConditionWait(&sync->videoFrameRequiredCond, &sync->videoFrameMutex);
 	}
 	MutexUnlock(&sync->videoFrameMutex);
 	mCoreSyncLockAudio(sync);
 	mCoreSyncProduceAudio(sync, buffer);
+}
+
+void mCoreSyncSetExternalPacing(struct mCoreSync* sync, bool external) {
+    // Readers hold either the video or audio lock, so take both to publish.
+    MutexLock(&sync->videoFrameMutex);
+    MutexLock(&sync->audioBufferMutex);
+    sync->externalPacing = external;
+    ConditionWake(&sync->videoFrameRequiredCond);
+    ConditionWake(&sync->audioRequiredCond);
+    MutexUnlock(&sync->audioBufferMutex);
+    MutexUnlock(&sync->videoFrameMutex);
 }

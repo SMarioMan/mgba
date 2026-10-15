@@ -16,6 +16,8 @@ CXX_GUARD_START
 
 mLOG_DECLARE_CATEGORY(SDL_AUDIO);
 
+struct mCoreThread;
+
 struct mSDLAudio {
 	// Input
 	size_t samples;
@@ -23,6 +25,7 @@ struct mSDLAudio {
 
 	// State
 	struct mAudioBuffer buffer;
+	struct mAudioBuffer inputBuffer;
 	struct mAudioResampler resampler;
 	SDL_AudioSpec desiredSpec;
 	SDL_AudioSpec obtainedSpec;
@@ -34,6 +37,10 @@ struct mSDLAudio {
 
 	struct mCore* core;
 	struct mCoreSync* sync;
+	struct mCoreThread* thread;
+	bool ringBuffered;
+	uint64_t outputSamples;
+	uint64_t underrunSamples;
 };
 
 struct mCoreThread;

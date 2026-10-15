@@ -31,6 +31,7 @@ struct Player {
 static FILE* videoLog;
 static FILE* progressLog;
 static unsigned videoFrom;
+static unsigned ringQuantum = 256;
 static uint32_t audioState, timingState, soundTable;
 static struct { uint32_t address; uint64_t cycles; } cycleProfile[32768];
 
@@ -99,7 +100,8 @@ static void captureFrame(void* context) {
             ++active;
             if ((obj[0] >> 14) == 3) ++invalid;
             unsigned tile = obj[2] & 1023;
-            if (tile >= 0x3C0 && tile < 0x3C8 && (obj[2] >> 12) == 6) menuCursors |= 1U << (tile - 0x3C0);
+            if ((obj[0] & 0x2000) && tile >= 0x3C0 && tile < 0x3E0) menuCursors |= 16;
+            if (tile >= 0x2C0 && tile < 0x300) menuCursors |= 1U << ((tile - 0x2C0) / 16);
             if (tile >= 512) ++slots[(tile - 512) / 64];
             if (tile == 0x132 && (obj[2] >> 12) >= 8) ++markers;
             if (tile == 0x09C && (obj[2] >> 12) >= 8) {
@@ -132,12 +134,15 @@ static void captureFrame(void* context) {
                 unsigned red = color & 255, green = (color >> 8) & 255, blue = (color >> 16) & 255;
                 if (red == green && green == blue && red >= 80 && red <= 160) ++skyRoadPixels;
             }
-        unsigned lap = 0;
+        unsigned lap = 0, starMask = 0, shrinkMask = 0, booMask = 0;
         unsigned count = player->core->rawRead8(player->core, 0x03003634, -1);
         if (count > 8) count = 0;
         for (unsigned i = 0; i < count; ++i) {
             uint32_t driver = player->core->rawRead32(player->core, 0x03003638 + i*4, -1);
             if (driver >= 0x02000000 && driver < 0x03007000) {
+                if ((int16_t)player->core->rawRead16(player->core, driver + 0x6A, -1) > 0) starMask |= 1U << i;
+                if ((int16_t)player->core->rawRead16(player->core, driver + 0x66, -1) > 0) booMask |= 1U << i;
+                if ((int16_t)player->core->rawRead16(player->core, driver + 0x68, -1) > 0) shrinkMask |= 1U << i;
                 unsigned rawLap = player->core->rawRead8(player->core, driver + 0xC7, -1);
                 unsigned racerLap = rawLap >= 127 ? rawLap - 127 : 0;
                 if (racerLap > lap) lap = racerLap;
@@ -147,7 +152,16 @@ static void captureFrame(void* context) {
                 player->core->rawRead32(player->core, 0x030066E0, -1),
                 player->core->rawRead16(player->core, 0x030066FE, -1), lap);
         fprintf(videoLog, ",%u,%u,%u,%u", skyRoadPixels, player->core->rawRead32(player->core, 0x03002E20, -1), balloonForeignPixels, player->core->rawRead32(player->core, 0x030066E4, -1));
-        fprintf(videoLog, ",%u", menuCursors);
+        fprintf(videoLog, ",%u,%u,%u,%u", menuCursors, starMask, shrinkMask, booMask);
+        unsigned displayBank = player->core->rawRead32(player->core, 0x030036B4, -1);
+        unsigned writeBank = player->core->rawRead32(player->core, 0x030036B8, -1);
+        uint32_t roadProjectionHash = 2166136261U;
+        if (displayBank < 2) {
+            for (unsigned offset = 0; offset < 96 * 16; offset += 4)
+                roadProjectionHash = (roadProjectionHash ^ player->core->rawRead32(player->core,
+                    0x03004FE0 + displayBank * 0x600 + offset, -1)) * 16777619U;
+        } else roadProjectionHash = 0;
+        fprintf(videoLog, ",%u,%u,%u", displayBank, writeBank, roadProjectionHash);
         if (soundTable) {
             uint32_t camera = player->core->rawRead32(player->core, 0x03003658, -1);
             bool validCamera = (camera >= 0x02000000 && camera < 0x0203FE00) || (camera >= 0x03000000 && camera < 0x03007E00);
@@ -188,12 +202,19 @@ static void yieldRingCore(struct mTiming* timing, void* context, uint32_t late) 
 	/* HALT normally processes events until an IRQ wakes the CPU. Bound that
 	 * advance so one console cannot pass its neighbours' serial edges. */
 	((struct GBA*) player->core->board)->earlyExit = true;
-	mTimingSchedule(timing, &player->quantum, late < 256 ? 256 - late : 1);
+	mTimingSchedule(timing, &player->quantum, late < ringQuantum ? ringQuantum - late : 1);
 }
 
 struct Input {
 	unsigned frame, player, keys;
 };
+
+static int compareInputs(const void* left, const void* right) {
+    const struct Input* a = left;
+    const struct Input* b = right;
+    if (a->frame != b->frame) return a->frame < b->frame ? -1 : 1;
+    return a->player < b->player ? -1 : a->player != b->player;
+}
 
 static unsigned emulationErrors;
 
@@ -287,9 +308,23 @@ struct Route {
     bool inMenu;
 };
 
+/* Keypad events are tied to a video boundary, never to how frequently the
+ * host happens to return from runLoop. This also matches the Qt test adapter. */
+static struct {
+    const struct Input* events;
+    size_t count, next[GBA_RING_MAX_PLAYERS];
+    struct Route routes[GBA_RING_MAX_PLAYERS];
+    unsigned driveFrom, firePeriod, fireSpread;
+    uint32_t barrierState, confirmScene, watch, watchValue;
+    bool autofire, untilWatch, recording, recordingError;
+    struct Input* recordedInputs;
+    size_t recordedCount, recordedCapacity;
+    unsigned recordedKeys[GBA_RING_MAX_PLAYERS];
+} playback;
+
 /* A test driver sends only keypad input. It observes the native checkpoint
  * route and kart heading, and never changes race RAM or human/CPU flags. */
-static void drivePlayer(struct mCore* core, unsigned slot, struct Route* route, bool autofire, uint32_t ringState) {
+static void drivePlayer(struct mCore* core, unsigned slot, struct Route* route, bool autofire, unsigned firePeriod, unsigned fireSpread, uint32_t ringState) {
     if (ringState && !core->busRead8(core, ringState + 117)) {
         /* Results retain the old race-state bytes. Stop the driving keys;
          * only the explicit auto-confirm-scene option may advance menus. */
@@ -403,8 +438,40 @@ static void drivePlayer(struct mCore* core, unsigned slot, struct Route* route, 
     unsigned keys = abs(error) > 8000 ? (3 | 256) : 1;
     if (error > 700) keys |= 16;
     if (error < -700) keys |= 32;
-    if (autofire && core->frameCounter(core) % 120 == 0) keys |= 512;
+    if (autofire && (core->frameCounter(core) + slot * fireSpread) % firePeriod == 0) keys |= 512;
     core->setKeys(core, keys);
+}
+
+static void applyFrameInputs(void* context) {
+    struct Player* player = context;
+    struct mCore* core = player->core;
+    unsigned i = player->id, frame = core->frameCounter(core);
+    while (playback.next[i] < playback.count) {
+        const struct Input* event = &playback.events[playback.next[i]];
+        if (event->frame > frame) break;
+        ++playback.next[i];
+        if (event->player == i) core->setKeys(core, event->keys);
+    }
+    if (frame >= playback.driveFrom) {
+        drivePlayer(core, i, &playback.routes[i], playback.autofire,
+                    playback.firePeriod, playback.fireSpread, playback.barrierState);
+        if (playback.confirmScene && core->busRead32(core, 0x03002E20) == playback.confirmScene &&
+            !(playback.untilWatch && core->busRead32(core, playback.watch) == playback.watchValue))
+            core->setKeys(core, frame % 60 < 15 ? 1 : 0);
+    }
+    if (playback.recording && !playback.recordingError) {
+        unsigned keys = core->getKeys(core);
+        if (playback.recordedKeys[i] == keys) return;
+        if (playback.recordedCount == playback.recordedCapacity) {
+            size_t capacity = playback.recordedCapacity ? playback.recordedCapacity * 2 : 1024;
+            struct Input* grown = realloc(playback.recordedInputs, capacity * sizeof(*grown));
+            if (!grown) { playback.recordingError = true; return; }
+            playback.recordedInputs = grown;
+            playback.recordedCapacity = capacity;
+        }
+        playback.recordedInputs[playback.recordedCount++] = (struct Input) {frame, i, keys};
+        playback.recordedKeys[i] = keys;
+    }
 }
 
 static bool number(const char* text, unsigned long* out) {
@@ -430,11 +497,14 @@ int main(int argc, char** argv) {
 	unsigned traceStopFrame = UINT_MAX, profileUntil = UINT_MAX, profileFrom = UINT_MAX;
 	uint32_t dumpAddress = 0, keysAddress = 0x03004F30;
 	uint32_t barrierState = 0, untilScene = 0, autoConfirmScene = 0;
-    unsigned settleFrames = 0;
+    unsigned settleFrames = 0, firePeriod = 120, fireSpread = 0;
 	unsigned dumpWords = 32;
 	unsigned keySlots = 4, autodriveFrame = UINT_MAX, debugStepFrame = UINT_MAX;
+	const char* recordInputPath = NULL;
+    bool threadedVideo = false;
 	bool ringMode = false, expectPoc = false, autofire = false, hle = false, barrierBeforeInput = false;
 	for (int i = 1; i < argc; ++i) {
+		if (!strcmp(argv[i], "--threaded-video")) { threadedVideo = true; continue; }
 		if (!strcmp(argv[i], "--hle")) { hle = true; continue; }
 		if (!strcmp(argv[i], "--barrier-before-input")) { barrierBeforeInput = true; continue; }
 		if (!strcmp(argv[i], "--autofire")) { autofire = true; continue; }
@@ -472,7 +542,11 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--key-slots") && number(value, &n) && n > 0 && n <= 8) keySlots = n;
 		else if (!strcmp(option, "--players") && number(value, &n) && n <= 8) players = n;
 		else if (!strcmp(option, "--debug-step-frame") && number(value, &n) && n < UINT_MAX) debugStepFrame = n;
-		else if (!strcmp(option, "--autodrive-frame") && number(value, &n) && n < UINT_MAX) autodriveFrame = n;
+		else if (!strcmp(option, "--ring-quantum") && number(value, &n) && n >= 64 && n <= 16384) ringQuantum = n;
+        else if (!strcmp(option, "--autofire-period") && number(value, &n) && n >= 10 && n <= 600) firePeriod = n;
+        else if (!strcmp(option, "--autofire-spread") && number(value, &n) && n <= 600) fireSpread = n;
+        else if (!strcmp(option, "--record-inputs")) recordInputPath = value;
+        else if (!strcmp(option, "--autodrive-frame") && number(value, &n) && n < UINT_MAX) autodriveFrame = n;
 		else if (!strcmp(option, "--frames") && number(value, &n) && n <= 100000) frames = n;
 		else if (!strcmp(option, "--until-watch-value") && number(value, &n) && n <= UINT32_MAX) { untilWatchValue = n; untilWatch = true; }
 		else if (!strcmp(option, "--watch") && number(value, &n) && n <= UINT32_MAX) watch = n;
@@ -505,6 +579,19 @@ int main(int argc, char** argv) {
 		}
 		fclose(f);
 	}
+    playback.events = inputs;
+    playback.count = nInputs;
+    playback.driveFrom = autodriveFrame;
+    playback.firePeriod = firePeriod;
+    playback.fireSpread = fireSpread;
+    playback.barrierState = barrierState;
+    playback.confirmScene = autoConfirmScene;
+    playback.watch = watch;
+    playback.watchValue = untilWatchValue;
+    playback.untilWatch = untilWatch;
+    playback.autofire = autofire;
+    playback.recording = recordInputPath != NULL;
+    for (unsigned i = 0; i < GBA_RING_MAX_PLAYERS; ++i) playback.recordedKeys[i] = UINT_MAX;
 	struct Player* p = calloc(players, sizeof(*p));
 	if (!p) { free(inputs); return 2; }
 	struct GBASIOLockstepCoordinator stock;
@@ -523,7 +610,7 @@ int main(int argc, char** argv) {
 	if (videoPath) {
 		videoLog = fopen(videoPath, "w");
 		if (!videoLog) { perror(videoPath); goto done; }
-        fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus,menuCursors");
+        fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus,menuCursors,starMask,shrinkMask,booMask,roadDisplayBuffer,roadWriteBuffer,roadProjectionHash");
         if (soundTable) fprintf(videoLog, ",localPlayer,cameraPlayer,fifoSource,pcmBufferEnd,pcmCounter,soundIdent,engineHeader,voiceHeader,effectHeader");
         if (timingState) fprintf(videoLog, ",exchangeCycles,renderCycles,profileFrame,publishCycles,mixCycles");
         if (audioState) {
@@ -547,6 +634,7 @@ int main(int argc, char** argv) {
 		mCoreConfigSetDefaultIntValue(&core->config, "useBios", !hle);
 		mCoreConfigSetDefaultIntValue(&core->config, "skipBios", hle);
 		mCoreConfigSetDefaultValue(&core->config, "idleOptimization", "ignore");
+		mCoreConfigSetOverrideIntValue(&core->config, "threadedVideo", threadedVideo);
 		mCoreConfigSetOverrideIntValue(&core->config, "mute", false);
         mCoreConfigSetOverrideIntValue(&core->config, "volume", 0x100);
 		mCoreLoadConfig(core);
@@ -563,7 +651,7 @@ int main(int argc, char** argv) {
             uint8_t blank[44] = {0};
             if (fwrite(blank, 1, sizeof(blank), p[i].audio) != sizeof(blank)) goto done;
         }
-        struct mCoreCallbacks callbacks = { .context = &p[i], .videoFrameEnded = captureFrame };
+        struct mCoreCallbacks callbacks = { .context = &p[i], .videoFrameEnded = captureFrame, .videoFrameStarted = applyFrameInputs };
         core->addCoreCallbacks(core, &callbacks);
 		if (!hle) {
 			struct VFile* vf = VFileOpen(bios, O_RDONLY);
@@ -592,7 +680,7 @@ int main(int argc, char** argv) {
 		if ((hle && gba->biosVf) || (!hle && !gba->biosVf)) { fprintf(stderr, "Requested BIOS mode was not applied\n"); goto done; }
 		if (ringMode) {
 			p[i].quantum = (struct mTimingEvent) { .context = &p[i], .callback = yieldRingCore, .name = "Ring runner scheduling quantum", .priority = 0xFF };
-			mTimingSchedule(core->timing, &p[i].quantum, 256);
+			mTimingSchedule(core->timing, &p[i].quantum, ringQuantum);
 		}
 	}
 #ifdef ENABLE_DEBUGGERS
@@ -614,7 +702,7 @@ int main(int argc, char** argv) {
 	}
 #endif
 	/* Input rows affect only the hardware keypad. The ring scheduling event
-     * bounds even BIOS HALT intervals to 256 cycles; stock sleep/wake is respected. */
+     * bounds BIOS HALT intervals to the selected quantum; stock sleep/wake is respected. */
 	uint64_t steps = 0;
 	unsigned lastMinFrame = 0;
     struct InstructionHistory { uint32_t pc, instruction, sp, lr, top; } history[1024] = {{0}};
@@ -626,9 +714,6 @@ int main(int argc, char** argv) {
 	uint32_t barrierRound = 0;
 	int barrierOwner = -1;
 	bool frozen[GBA_RING_MAX_PLAYERS] = { false };
-    struct Route routes[GBA_RING_MAX_PLAYERS] = {0};
-    unsigned drivenFrame[GBA_RING_MAX_PLAYERS] = {0};
-    size_t inputNext[GBA_RING_MAX_PLAYERS] = {0};
 	for (;;) {
         if (emulationErrors) {
 #ifdef ENABLE_DEBUGGERS
@@ -707,24 +792,6 @@ int main(int argc, char** argv) {
 					frozen[i] |= core->busRead8(core, barrierState + 144) || nextInput;
 			}
 			if (barrierState ? !frozen[i] : frame < frames) complete = false;
-            /* CSV frames are sorted. Each console only needs to scan new
-             * rows up to its current video frame, not the whole recording
-             * on every CPU scheduling quantum. Preserve same-frame order. */
-            while (inputNext[i] < nInputs) {
-                size_t e = inputNext[i];
-                if (inputs[e].frame > frame) break;
-                ++inputNext[i];
-                if (inputs[e].player == i) {
-                    core->setKeys(core, inputs[e].keys);
-                }
-            }
-            if (frame >= autodriveFrame && frame != drivenFrame[i]) {
-                drivePlayer(core, i, &routes[i], autofire, barrierState);
-                if (autoConfirmScene && core->busRead32(core, 0x03002E20) == autoConfirmScene &&
-                    !(untilWatch && core->busRead32(core, watch) == untilWatchValue))
-                    core->setKeys(core, frame % 60 < 15 ? 1 : 0);
-                drivenFrame[i] = frame;
-            }
 			if (p[i].asleep || frozen[i]) continue;
 			uint64_t now = mTimingGlobalTime(core->timing);
 			if (now < earliest) { earliest = now; selected = i; }
@@ -808,11 +875,11 @@ int main(int argc, char** argv) {
 		printf("%s{\"slot\":%u,\"frame\":%u,\"siocnt\":%u,\"watch\":%u,\"poc\":{\"magic\":%u,\"id\":%u,\"count\":%u,\"rounds\":%u,\"errors\":%u,\"timeouts\":%u,\"frameCycles\":%u,\"inputs\":[", i ? "," : "", i, core->frameCounter(core), core->busRead16(core, 0x04000128), watch ? core->busRead32(core, watch) : 0, magic, id, count, rounds, errors, timeouts, core->busRead32(core, 0x02000040));
 		for (unsigned j = 0; j < 8; ++j) printf("%s%u", j ? "," : "", core->busRead32(core, 0x02000020 + j * 4));
 		printf("]},\"pc\":%u,\"lr\":%u,\"sp\":%u,\"irq\":%u,\"ime\":%u,\"gameFrames\":%u", (unsigned) pc, (unsigned) lr, (unsigned) sp, core->busRead16(core, 0x04000200), core->busRead16(core, 0x04000208), core->busRead32(core, 0x03002E30));
-        if (routes[i].checkpoints) {
-            printf(",\"routeCheckpoints\":%u,\"nativeCheckpoints\":%u,\"routeHeader\":%u,\"nativeHeader\":%u,\"route\":[", routes[i].checkpoints,
-                   core->busRead16(core, 0x03002E58), routes[i].headerIndex, core->busRead8(core, 0x03003621));
-            for (unsigned cp = 0; cp < routes[i].checkpoints; ++cp)
-                printf("%s[%d,%d,%d]", cp ? "," : "", routes[i].x[cp], routes[i].y[cp], routes[i].count[cp]);
+        if (playback.routes[i].checkpoints) {
+            printf(",\"routeCheckpoints\":%u,\"nativeCheckpoints\":%u,\"routeHeader\":%u,\"nativeHeader\":%u,\"route\":[", playback.routes[i].checkpoints,
+                   core->busRead16(core, 0x03002E58), playback.routes[i].headerIndex, core->busRead8(core, 0x03003621));
+            for (unsigned cp = 0; cp < playback.routes[i].checkpoints; ++cp)
+                printf("%s[%d,%d,%d]", cp ? "," : "", playback.routes[i].x[cp], playback.routes[i].y[cp], playback.routes[i].count[cp]);
             printf("]");
         }
         if (barrierState) {
@@ -833,7 +900,7 @@ int main(int argc, char** argv) {
             printf("]");
         }
 		{
-			printf(",\"game\":{\"sceneMain\":%u,\"humanCount\":%u,\"localId\":%u,\"raceFlags\":%u,\"finishLap\":%u,\"drivers\":[", core->busRead32(core, 0x03002E20), core->busRead8(core, 0x0300361B), core->busRead8(core, 0x0300361C), core->busRead16(core, 0x0300361E), core->busRead8(core, 0x0300362B));
+			printf(",\"game\":{\"sceneMain\":%u,\"humanCount\":%u,\"localId\":%u,\"raceFlags\":%u,\"finishLap\":%u,\"engineClass\":%u,\"headerIndex\":%u,\"drivers\":[", core->busRead32(core, 0x03002E20), core->busRead8(core, 0x0300361B), core->busRead8(core, 0x0300361C), core->busRead16(core, 0x0300361E), core->busRead8(core, 0x0300362B), core->busRead8(core, 0x03003620), core->busRead8(core, 0x03003621));
 			for (unsigned j = 0; j < 8; ++j) {
 				uint32_t driver = core->busRead32(core, 0x03003638 + j * 4);
 				bool valid = (driver >= 0x02000000 && driver < 0x0203FFBC) || (driver >= 0x03000000 && driver < 0x03007FBC);
@@ -969,6 +1036,17 @@ done:
 	}
 	GBASIOLockstepCoordinatorDeinit(&stock);
 	free(p);
+    if (recordInputPath) {
+        qsort(playback.recordedInputs, playback.recordedCount, sizeof(*playback.recordedInputs), compareInputs);
+        FILE* recording = fopen(recordInputPath, "w");
+        if (!recording) result = 1;
+        else {
+            for (size_t i = 0; i < playback.recordedCount; ++i)
+                if (fprintf(recording, "%u,%u,%x\n", playback.recordedInputs[i].frame, playback.recordedInputs[i].player, playback.recordedInputs[i].keys) < 0) playback.recordingError = true;
+            if (fclose(recording) || playback.recordingError) result = 1;
+        }
+    }
+    free(playback.recordedInputs);
 	free(inputs);
 	mLogSetDefaultLogger(NULL);
 	return result;

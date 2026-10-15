@@ -253,6 +253,12 @@ bool MultiplayerController::attachGame(CoreController* controller) {
 #ifdef M_CORE_GBA
 	case mPLATFORM_GBA: {
 		if (m_ringTopology) {
+#ifndef MINIMAL_CORE
+            // Cable timing requires one ordered CPU executor, but scanline
+            // rendering does not. Keep it on the core's existing video worker
+            // so linked windows can use the host's other CPU cores.
+            mCoreConfigSetDefaultIntValue(&thread->core->config, "threadedVideo", 1);
+#endif
 			player.node.ring = new GBASIORingThreadNode;
 			if (!GBASIORingThreadAttach(&m_ringCoordinator, player.node.ring, thread)) {
 				delete player.node.ring;

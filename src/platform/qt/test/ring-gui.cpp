@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: MPL-2.0 */
 #include "platform/qt/ConfigController.h"
+#include "platform/qt/AudioProcessor.h"
+#ifdef BUILD_QT_MULTIMEDIA
+#include "platform/qt/AudioProcessorQt.h"
+#endif
 #include "platform/qt/CoreController.h"
 #include "platform/qt/CoreManager.h"
 #include "platform/qt/GBAApp.h"
@@ -19,9 +23,13 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#ifdef BUILD_SDL
+#include "platform/sdl/sdl-audio.h"
+#endif
 
 using namespace QGBA;
 
@@ -35,7 +43,16 @@ struct Inputs {
     unsigned firstSimulation = 0, lastSimulation = 0, speedStartFrame = 0;
     unsigned minSpeedFrame = 0;
     bool measureSpeed = false, deferMotion = false, speedComplete = false;
-    unsigned motionFrame = 3500;
+    unsigned finishScene = 0;
+    // Publish milestones without interrupting eight producers on every GUI
+    // poll. Measurement itself must not drain their host audio queues.
+    std::shared_ptr<std::atomic<unsigned>> audioProgress = std::make_shared<std::atomic<unsigned>>(0);
+    unsigned motionFrame = 3500, speedWindow = 600;
+    std::chrono::steady_clock::time_point speedWallStart;
+    std::chrono::steady_clock::time_point previousFrameWall;
+    double wallFramesPerSecond = 0;
+    double longestFrameGapMs = 0;
+    unsigned delayedHostFrames = 0;
 	static void frame(void* context) {
 		Inputs* inputs = static_cast<Inputs*>(context);
 		mCore* core = inputs->controller->thread()->core;
@@ -43,14 +60,27 @@ struct Inputs {
         unsigned simulation = core->rawRead32(core, 0x03002E30, -1);
         bool racing = core->rawRead8(core, 0x03006BB5, -1) && simulation >= 128;
         if (inputs->measureSpeed && !inputs->speedComplete && racing && frame >= inputs->minSpeedFrame) {
+            auto now = std::chrono::steady_clock::now();
+            if (inputs->speedStartFrame) {
+                double gap = std::chrono::duration<double, std::milli>(now - inputs->previousFrameWall).count();
+                inputs->longestFrameGapMs = std::max(inputs->longestFrameGapMs, gap);
+                if (gap > 25) ++inputs->delayedHostFrames;
+            }
+            inputs->previousFrameWall = now;
             if (!inputs->speedStartFrame) {
                 inputs->speedStartFrame = frame;
+                inputs->speedWallStart = std::chrono::steady_clock::now();
                 inputs->firstSimulation = simulation;
-            } else if (frame >= inputs->speedStartFrame + 600) {
+                inputs->audioProgress->fetch_or(1, std::memory_order_release);
+            } else if (frame >= inputs->speedStartFrame + inputs->speedWindow) {
                 inputs->lastSimulation = simulation;
+                inputs->wallFramesPerSecond = inputs->speedWindow / std::chrono::duration<double>(std::chrono::steady_clock::now() - inputs->speedWallStart).count();
                 inputs->speedComplete = true;
+                inputs->audioProgress->fetch_or(2, std::memory_order_release);
             }
         }
+        if (inputs->finishScene && core->rawRead32(core, 0x03002E20, -1) == inputs->finishScene)
+            inputs->audioProgress->fetch_or(4, std::memory_order_release);
         if (inputs->breakWire && frame >= 2600) {
             auto driver = reinterpret_cast<GBASIORingDriver*>(static_cast<GBA*>(core->board)->sio.driver);
             driver->ring->openInputs = frame < 2900 ? 1U << 4 : 0;
@@ -90,7 +120,7 @@ private slots:
     void borrowedFailureLifetime() {
         // A crashed or exiting borrowed core must remain exclusively owned
         // until its callback returns, before the GUI can detach its cable.
-        for (bool shutdown : {false, true}) {
+        for (bool batch : {false, true}) for (bool shutdown : {false, true}) {
             struct Gate {
                 std::mutex mutex;
                 std::condition_variable condition;
@@ -116,9 +146,9 @@ private slots:
                 if (!waiting) QTest::qWait(1);
             }
             QVERIFY(waiting);
-            bool borrowed = false;
+            bool borrowed = false, ranRevoked = false;
             std::thread worker([&] {
-                borrowed = mCoreThreadRunWaiting(&thread, [](mCoreThread* t) {
+                ThreadCallback action = [](mCoreThread* t) {
                     Gate* g = static_cast<Gate*>(t->userData);
                     if (g->shutdown) mCoreThreadEnd(t);
                     else mCoreThreadMarkCrashed(t);
@@ -126,7 +156,15 @@ private slots:
                     g->entered = true;
                     g->condition.notify_all();
                     g->condition.wait(lock, [&] { return g->release; });
-                });
+                };
+                if (batch) {
+                    borrowed = mCoreThreadBorrowWaiting(&thread);
+                    if (borrowed) {
+                        borrowed = mCoreThreadRunBorrowed(&thread, action);
+                        ranRevoked = mCoreThreadRunBorrowed(&thread, [](mCoreThread*) {});
+                        mCoreThreadReturnBorrowed(&thread);
+                    }
+                } else borrowed = mCoreThreadRunWaiting(&thread, action);
             });
             {
                 std::unique_lock<std::mutex> lock(gate.mutex);
@@ -147,6 +185,7 @@ private slots:
             mCoreThreadJoin(&thread);
             core->deinit(core);
             QVERIFY(borrowed);
+            QVERIFY(!ranRevoked);
             QVERIFY2(!premature, "GUI interruption returned before the borrowed failure callback finished");
         }
     }
@@ -177,13 +216,6 @@ private slots:
             if (frame < 1500) continue; // This ROM boots directly into Ring Link.
             inputs[slot].events.append(qMakePair(frame >= 2000 ? frame + 600 : frame, fields[2].toUInt(nullptr,16)));
         }
-        // Cycle Mario through DK -> Wario -> Bowser and around twice via real
-        // Qt key events, then return to Mario before the normal ready press.
-        for (unsigned j = 0; j < 16; ++j) {
-            inputs[0].events.append(qMakePair(1850U + 30*j, 16U));
-            inputs[0].events.append(qMakePair(1865U + 30*j, 0U));
-        }
-        std::sort(inputs[0].events.begin(), inputs[0].events.end());
         auto windows = app->windows();
         for (int i = 0; i < 8; ++i) {
             Window* window = windows[i];
@@ -227,7 +259,7 @@ private slots:
             QCOMPARE(core->rawRead32(core, 0x03006B98, -1), 0U);
             QCOMPARE(core->rawRead32(core, 0x03006B9C, -1), 0U);
             QVERIFY(inputs[i].speedComplete);
-            double rate = double(inputs[i].lastSimulation - inputs[i].firstSimulation) / 600;
+            double rate = double(inputs[i].lastSimulation - inputs[i].firstSimulation) / inputs[i].speedWindow;
             qInfo("Scripted P%d speed %.3f native updates/video frame", i+1, rate);
             QVERIFY(rate >= 0.95);
             // Independently persist each keyboard map, then load it afresh.
@@ -285,6 +317,10 @@ private slots:
 		QFETCH(int, players);
 		QFETCH(QString, mode);
 		QFETCH(bool, ringTopology);
+        bool qtAudioCheck = qEnvironmentVariable("MGBA_RING_GUI_AUDIO") == "qt";
+        bool audioCheck = qtAudioCheck || qEnvironmentVariableIntValue("MGBA_RING_GUI_AUDIO") != 0;
+        bool sdlAudioCheck = audioCheck && !qtAudioCheck;
+        unsigned finishScene = qEnvironmentVariable("MGBA_RING_GUI_FINISH_SCENE").toUInt(nullptr, 0);
 		QFETCH(bool, lateBoot);
         QFETCH(bool, wireLoss);
 		GBAApp* app = GBAApp::app();
@@ -338,8 +374,11 @@ private slots:
 			QVERIFY(controller);
 			inputs[i].controller = controller;
             inputs[i].breakWire = wireLoss && !i;
+            inputs[i].finishScene = finishScene;
             inputs[i].measureSpeed = ringTopology && !wireLoss;
-            inputs[i].deferMotion = ringTopology && !wireLoss;
+            inputs[i].deferMotion = ringTopology && !wireLoss && !audioCheck && !qEnvironmentVariableIntValue("MGBA_RING_GUI_MOTION");
+            if (qEnvironmentVariableIntValue("MGBA_RING_GUI_MOTION")) inputs[i].speedWindow = 3600;
+            if (audioCheck) inputs[i].speedWindow = std::max(600, qEnvironmentVariableIsSet("MGBA_RING_GUI_AUDIO_FRAMES") ? qEnvironmentVariableIntValue("MGBA_RING_GUI_AUDIO_FRAMES") : 3600);
 			controller->setPaused(true);
 			mCoreCallbacks callbacks{};
 			callbacks.context = &inputs[i];
@@ -366,6 +405,48 @@ private slots:
 			QVERIFY(app->multiplayer()->setRingTopology(false));
 			QVERIFY(app->multiplayer()->setRingTopology(true));
 		}
+        bool audioMeasured = false;
+#ifdef BUILD_SDL
+        struct AudioOutput {
+            mSDLAudio device{};
+            bool active = false;
+            ~AudioOutput() { if (active) mSDLDeinitAudio(&device); }
+        } audio[8];
+        if (sdlAudioCheck) {
+            for (int i = 0; i < players; ++i) {
+                // Replace the window's dummy consumer; two readers of the
+                // same FIFO would manufacture underruns in this measurement.
+                QTRY_VERIFY_WITH_TIMEOUT(windows[i]->audioProcessor(), 10000);
+                AudioProcessor* previousAudio = windows[i]->audioProcessor();
+                previousAudio->stop();
+                QObject::disconnect(windows[i]->controller().get(), nullptr, previousAudio, nullptr);
+                audio[i].device.samples = 512;
+                audio[i].device.sampleRate = 48000;
+                audio[i].active = mSDLInitAudio(&audio[i].device, windows[i]->controller()->thread());
+                QVERIFY2(audio[i].active, SDL_GetError());
+                CoreController::Interrupter interrupter(windows[i]->controller());
+                windows[i]->controller()->thread()->impl->sync.audioWait = true;
+            }
+        }
+#else
+        QVERIFY2(!sdlAudioCheck, "SDL delivery validation requires the SDL backend");
+#endif
+#ifdef BUILD_QT_MULTIMEDIA
+        AudioProcessorQt* qtAudio[8] = {};
+        if (qtAudioCheck) {
+            for (int i = 0; i < players; ++i) {
+                QTRY_VERIFY_WITH_TIMEOUT(windows[i]->audioProcessor(), 10000);
+                qtAudio[i] = qobject_cast<AudioProcessorQt*>(windows[i]->audioProcessor());
+                QVERIFY(qtAudio[i]);
+                QVERIFY2(qtAudio[i]->outputThread() != QThread::currentThread(),
+                         "Ring output must not depend on the GUI event loop");
+                CoreController::Interrupter interrupter(windows[i]->controller());
+                windows[i]->controller()->thread()->impl->sync.audioWait = true;
+            }
+        }
+#else
+        QVERIFY2(!qtAudioCheck, "Qt delivery validation requires Qt Multimedia");
+#endif
 		for (Window* window : windows) window->controller()->setPaused(false);
 		if (players == 8) { QVERIFY(!app->newWindow()); QVERIFY(!app->multiplayer()->setRingTopology(false)); }
 		bool entered = false;
@@ -373,9 +454,59 @@ private slots:
 		timer.start();
 		qint64 nextProgress = 30000;
 		while (!entered && timer.elapsed() < 600000) {
-			QTest::qWait(20);
-			QList<CoreController::Interrupter> interrupters;
-			for (Window* window : windows) interrupters.append(window->controller());
+			QTest::qWait(audioCheck ? 250 : 20);
+            if (audioCheck) {
+                bool allRacing = true, allComplete = true;
+                unsigned required = 2 | (finishScene ? 4 : 0);
+                for (int i = 0; i < players; ++i) {
+                    unsigned progress = inputs[i].audioProgress->load(std::memory_order_acquire);
+                    allRacing &= (progress & 1) != 0;
+                    allComplete &= (progress & required) == required;
+                }
+                if (allRacing && !audioMeasured) {
+                    for (int i = 0; i < players; ++i) {
+#ifdef BUILD_SDL
+                        if (sdlAudioCheck) {
+                            mSDLPauseAudio(&audio[i].device);
+                            audio[i].device.outputSamples = audio[i].device.underrunSamples = 0;
+                            mSDLResumeAudio(&audio[i].device);
+                        }
+#endif
+#ifdef BUILD_QT_MULTIMEDIA
+                        if (qtAudioCheck) {
+                            if (qtAudio[i]->thread() == QThread::currentThread()) qtAudio[i]->resetDeliveryStats();
+                            else QMetaObject::invokeMethod(qtAudio[i], [&, i]() {
+                                qtAudio[i]->resetDeliveryStats();
+                            }, Qt::BlockingQueuedConnection);
+                        }
+#endif
+                    }
+                    audioMeasured = true;
+                }
+                if (!allComplete) {
+                    if (timer.elapsed() >= nextProgress) {
+                        qInfo("GUI audio: collecting uninterrupted %u-frame moving window", inputs[0].speedWindow);
+                        nextProgress += 30000;
+                    }
+                    continue;
+                }
+                // End delivery measurement before interrupting any producer
+                // for the final state checks. Interrupting one ring CPU stops
+                // its peers too; leaving devices running would count that
+                // deliberate debugger-style stop as gameplay starvation.
+                // Stop peers first so the reference output keeps pacing the
+                // remaining devices until their measurements have ended.
+                for (int i = players - 1; i >= 0; --i) {
+#ifdef BUILD_SDL
+                    if (sdlAudioCheck) mSDLPauseAudio(&audio[i].device);
+#endif
+#ifdef BUILD_QT_MULTIMEDIA
+                    if (qtAudioCheck) qtAudio[i]->pause();
+#endif
+                }
+            }
+            QList<CoreController::Interrupter> interrupters;
+            for (Window* window : windows) interrupters.append(window->controller());
 			entered = true;
 			for (int i = 0; i < players; ++i) {
 				mCore* core = windows[i]->controller()->thread()->core;
@@ -392,6 +523,14 @@ private slots:
                                 core->rawRead32(core, 0x03006B9C, -1));
                     }
                     continue;
+                }
+                if (finishScene && core->rawRead32(core, 0x03002E20, -1) != finishScene) { entered = false; continue; }
+                if (finishScene) {
+                    QCOMPARE(core->rawRead8(core, 0x03003620, -1), 2U);
+                    QCOMPARE(core->rawRead8(core, 0x03003621, -1), 32U);
+                    uint32_t host = core->rawRead32(core, 0x03003638, -1);
+                    QCOMPARE(core->rawRead8(core, host + 0x4C, -1) & 7, 6U);
+                    QVERIFY(core->rawRead8(core, host + 0xC7, -1) >= 0x83);
                 }
 				if (core->frameCounter(core) < 4901 || (ringTopology && !wireLoss && !inputs[i].speedComplete) || core->rawRead8(core, 0x0300361B, -1) != unsigned(players)) { entered = false; continue; }
 				QCOMPARE(core->rawRead8(core, 0x0300361C, -1), unsigned(i));
@@ -410,8 +549,9 @@ private slots:
 					QCOMPARE(core->rawRead8(core, driver + 0xEC, -1), unsigned(racer));
 				}
                 if (ringTopology && !wireLoss) {
-                    double rate = double(inputs[i].lastSimulation - inputs[i].firstSimulation) / 600;
-                    qInfo("GUI player %d native game speed %.3f updates/video frame", i + 1, rate);
+                    double rate = double(inputs[i].lastSimulation - inputs[i].firstSimulation) / inputs[i].speedWindow;
+                    qInfo("GUI player %d: %.3f updates/video frame, %.2f video frames/wall second", i + 1, rate, inputs[i].wallFramesPerSecond);
+                    if (audioCheck) qInfo("GUI player %d: longest host frame gap %.2f ms, %u gaps above 25 ms", i + 1, inputs[i].longestFrameGapMs, inputs[i].delayedHostFrames);
                     QVERIFY2(rate >= 0.95, "GUI gameplay runs below 95% speed");
                 }
 				if (ringTopology) {
@@ -425,6 +565,35 @@ private slots:
 		QVERIFY2(entered, "GUI windows did not enter a linked race through keypad input");
 		qInfo("GUI %s/%d %s with real BIOS in %lld ms", qPrintable(mode), players,
               wireLoss ? "survived a start-time wire loss" : "entered", timer.elapsed());
+#ifdef BUILD_SDL
+        if (sdlAudioCheck) {
+            QVERIFY(audioMeasured);
+            for (int i = 0; i < players; ++i) {
+                mSDLPauseAudio(&audio[i].device);
+                qInfo("GUI SDL P%d: %llu output samples, %llu underrun samples", i + 1,
+                      (unsigned long long) audio[i].device.outputSamples,
+                      (unsigned long long) audio[i].device.underrunSamples);
+            }
+            for (int i = 0; i < players; ++i) {
+                QVERIFY(audio[i].device.outputSamples > 48000 * 30);
+                QCOMPARE(audio[i].device.underrunSamples, uint64_t(0));
+            }
+        }
+#endif
+#ifdef BUILD_QT_MULTIMEDIA
+        if (qtAudioCheck) {
+            QVERIFY(audioMeasured);
+            for (int i = 0; i < players; ++i) {
+                qInfo("GUI Qt P%d: %llu delivered frames, %llu underrun events", i + 1,
+                      (unsigned long long)qtAudio[i]->deliveredFrames(),
+                      (unsigned long long)qtAudio[i]->underrunEvents());
+            }
+            for (int i = 0; i < players; ++i) {
+                QVERIFY(qtAudio[i]->deliveredFrames() > qtAudio[i]->sampleRate() * 30);
+                QCOMPARE(qtAudio[i]->underrunEvents(), uint64_t(0));
+            }
+        }
+#endif
 		if (ringTopology) {
 			QAction* pause = nullptr;
 			for (QAction* action : first->findChildren<QAction*>()) if (QString(action->text()).remove('&') == "Pause") pause = action;
@@ -442,6 +611,13 @@ private slots:
 			}
 		}
 		// Interrupt/close every participant, including an active middle cable node.
+		// A suspended audio device must also close without trying to drain a
+		// corked stream. Exercise that lifecycle with the real Qt backend.
+#ifdef BUILD_QT_MULTIMEDIA
+        if (qtAudioCheck) {
+            for (Window* window : windows) window->audioProcessor()->pause();
+        }
+#endif
 		for (Window* window : windows) window->close();
 		QTRY_COMPARE_WITH_TIMEOUT(app->multiplayer()->attached(), 0, 10000);
 		QTRY_COMPARE_WITH_TIMEOUT(app->windows().size(), 0, 10000);
@@ -461,12 +637,17 @@ int main(int argc, char** argv) {
 	qputenv("XDG_CONFIG_HOME", configDirectory.path().toUtf8());
 	ConfigController config;
 	config.setQtOption("displayDriver", 0);
+    if (qEnvironmentVariableIsSet("MGBA_RING_GUI_THREADED")) config.setOption("threadedVideo", qEnvironmentVariableIntValue("MGBA_RING_GUI_THREADED"));
+    bool qtAudio = qEnvironmentVariable("MGBA_RING_GUI_AUDIO") == "qt";
+    bool audioCheck = qtAudio || qEnvironmentVariableIntValue("MGBA_RING_GUI_AUDIO");
+    if (qtAudio) config.setQtOption("audioDriver", 0);
+    else if (audioCheck || qEnvironmentVariableIntValue("MGBA_RING_GUI_MOTION")) config.setQtOption("audioDriver", -1);
 	bool sync = qEnvironmentVariableIntValue("MGBA_RING_GUI_SYNC") != 0;
 	config.setOption("audioSync", sync);
 	config.setOption("videoSync", sync);
 	config.setOption("pauseOnFocusLost", false);
 	config.setOption("pauseOnMinimize", false);
-	config.setOption("mute", true);
+	config.setOption("mute", !audioCheck);
 	config.setOption("useBios", true);
 	config.setOption("skipBios", false);
 	config.setOption("gba.bios", qEnvironmentVariable("MGBA_RING_GUI_BIOS").toUtf8().constData());

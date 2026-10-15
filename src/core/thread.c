@@ -41,6 +41,7 @@ static BOOL CALLBACK _createTLS(PINIT_ONCE once, PVOID param, PVOID* context) {
 static void _mCoreLog(struct mLogger* logger, int category, enum mLogLevel level, const char* format, va_list args);
 
 static void _changeState(struct mCoreThreadInternal* threadContext, enum mCoreThreadState newState) {
+	ATOMIC_STORE(threadContext->borrowStop, 1);
 	threadContext->state = newState;
 	ConditionWake(&threadContext->stateOffThreadCond);
 }
@@ -52,6 +53,7 @@ static void _waitOnInterrupt(struct mCoreThreadInternal* threadContext) {
 }
 
 static void _pokeRequest(struct mCoreThreadInternal* threadContext) {
+	ATOMIC_STORE(threadContext->borrowStop, 1);
 	switch (threadContext->state) {
 	case mTHREAD_RUNNING:
 	case mTHREAD_PAUSED:
@@ -539,6 +541,7 @@ void mCoreThreadEnd(struct mCoreThread* threadContext) {
 		return;
 	}
 	_waitOnInterrupt(threadContext->impl);
+	ATOMIC_STORE(threadContext->impl->borrowStop, 1);
 	threadContext->impl->state = mTHREAD_EXITING;
 	ConditionWake(&threadContext->impl->stateOnThreadCond);
 	MutexUnlock(&threadContext->impl->stateMutex);
@@ -606,6 +609,7 @@ void mCoreThreadInterrupt(struct mCoreThread* threadContext) {
 		return;
 	}
 	MutexLock(&threadContext->impl->stateMutex);
+	ATOMIC_STORE(threadContext->impl->borrowStop, 1);
 	++threadContext->impl->interruptDepth;
 	if (threadContext->impl->interruptDepth > 1 || !_isActive(threadContext->impl)) {
 		while (threadContext->impl->borrowed) _wait(threadContext->impl);
@@ -622,6 +626,7 @@ void mCoreThreadInterruptFromThread(struct mCoreThread* threadContext) {
 		return;
 	}
 	MutexLock(&threadContext->impl->stateMutex);
+	ATOMIC_STORE(threadContext->impl->borrowStop, 1);
 	++threadContext->impl->interruptDepth;
 	if (threadContext->impl->interruptDepth > 1 || !_isActive(threadContext->impl)) {
 		if (threadContext->impl->state == mTHREAD_INTERRUPTING) {
@@ -735,7 +740,7 @@ void mCoreThreadStopWaiting(struct mCoreThread* threadContext) {
 	MutexUnlock(&threadContext->impl->stateMutex);
 }
 
-bool mCoreThreadRunWaiting(struct mCoreThread* threadContext, ThreadCallback callback) {
+bool mCoreThreadBorrowWaiting(struct mCoreThread* threadContext) {
 	struct mCoreThreadInternal* impl = threadContext->impl;
 	MutexLock(&impl->stateMutex);
 	if (!impl->waitingOnCondition || impl->state != mTHREAD_PAUSED || impl->requested != mTHREAD_REQ_WAIT || impl->borrowed || impl->interruptDepth) {
@@ -743,7 +748,15 @@ bool mCoreThreadRunWaiting(struct mCoreThread* threadContext, ThreadCallback cal
 		return false;
 	}
 	impl->borrowed = true;
+	ATOMIC_STORE(impl->borrowStop, 0);
 	MutexUnlock(&impl->stateMutex);
+	return true;
+}
+
+bool mCoreThreadRunBorrowed(struct mCoreThread* threadContext, ThreadCallback callback) {
+	int stopped;
+	ATOMIC_LOAD(stopped, threadContext->impl->borrowStop);
+	if (stopped) return false;
 	struct mCoreThread* previous = mCoreThreadGet();
 	struct mLogger* logger = mLogGetThreadLogger();
 	ThreadLocalSetKey(_contextKey, threadContext);
@@ -751,13 +764,24 @@ bool mCoreThreadRunWaiting(struct mCoreThread* threadContext, ThreadCallback cal
 	callback(threadContext);
 	mLogSetThreadLogger(logger);
 	ThreadLocalSetKey(_contextKey, previous);
+	return true;
+}
+
+void mCoreThreadReturnBorrowed(struct mCoreThread* threadContext) {
+	struct mCoreThreadInternal* impl = threadContext->impl;
 	MutexLock(&impl->stateMutex);
 	impl->borrowed = false;
 	ConditionWake(&impl->stateOffThreadCond);
 	if (impl->state != mTHREAD_PAUSED || impl->requested != mTHREAD_REQ_WAIT)
 		ConditionWake(&impl->stateOnThreadCond);
 	MutexUnlock(&impl->stateMutex);
-	return true;
+}
+
+bool mCoreThreadRunWaiting(struct mCoreThread* threadContext, ThreadCallback callback) {
+	if (!mCoreThreadBorrowWaiting(threadContext)) return false;
+	bool ran = mCoreThreadRunBorrowed(threadContext, callback);
+	mCoreThreadReturnBorrowed(threadContext);
+	return ran;
 }
 
 struct mCoreThread* mCoreThreadGet(void) {

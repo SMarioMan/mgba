@@ -28,6 +28,8 @@ struct mCoreSync {
 	/* A serialized multi-core executor publishes output while holding its
 	 * execution lock, then waits for consumers after releasing that lock. */
 	bool deferWait;
+	/* A linked reference core supplies the host-time pacing for this peer. */
+	bool externalPacing;
 };
 
 struct mCoreOptions;
@@ -38,6 +40,7 @@ void mCoreSyncForceFrame(struct mCoreSync* sync);
 bool mCoreSyncWaitFrameStart(struct mCoreSync* sync);
 void mCoreSyncWaitFrameEnd(struct mCoreSync* sync);
 void mCoreSyncSetVideoSync(struct mCoreSync* sync, bool wait);
+void mCoreSyncSetExternalPacing(struct mCoreSync* sync, bool external);
 
 struct mAudioBuffer;
 void mCoreSyncWaitDeferred(struct mCoreSync* sync, const struct mAudioBuffer*);

@@ -91,6 +91,7 @@ struct mCoreThreadInternal {
 	enum mCoreThreadState state;
 	bool rewinding;
 	bool borrowed;
+	int borrowStop;
 	bool waitingOnCondition;
 	int requested;
 
@@ -132,6 +133,11 @@ void mCoreThreadStopWaiting(struct mCoreThread* threadContext);
  * Its owning thread and interrupt acknowledgements stay asleep until it returns.
  * User pauses, resets, interrupts, and shutdowns cannot be borrowed. */
 bool mCoreThreadRunWaiting(struct mCoreThread* threadContext, ThreadCallback callback);
+/* Reserve an asleep core across a bounded batch. Requests atomically revoke
+ * further callbacks; ReturnBorrowed must run before handing off execution. */
+bool mCoreThreadBorrowWaiting(struct mCoreThread* threadContext);
+bool mCoreThreadRunBorrowed(struct mCoreThread* threadContext, ThreadCallback callback);
+void mCoreThreadReturnBorrowed(struct mCoreThread* threadContext);
 
 bool mCoreThreadHasCrashed(struct mCoreThread* threadContext);
 void mCoreThreadMarkCrashed(struct mCoreThread* threadContext);
