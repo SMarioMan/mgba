@@ -46,11 +46,14 @@ late boot of a second console, and close/reopen checks. Complete-round and synch
 remain covered by the headless harness.
 
 BIOS-backed GUI checks passed for both ring modes with two/eight windows and
-both standard modes with four windows. Synchronized two- and eight-window playback and
-staggered boot also passed. The default Qt build has 34 passing CTest targets;
-its fixture-free GUI rows skip explicitly. Concurrent eight-window stress
-runs on the shared cloud VM were below real time; these checks establish
-functional behavior, not desktop throughput.
+both standard modes with four windows. Synchronized two- and eight-window
+playback and staggered boot also passed. The final private-fixture run passes
+all 35 CTest targets, including all 13 GUI rows with no skips. A separate launch
+using the distributed executable, bundled libraries and final boot-shared ROM
+passes eight-window startup and reports 1.000 native simulation updates per
+video frame on all eight consoles. These are software/offscreen checks; they
+do not establish desktop wall-clock throughput. Without private fixtures, GUI
+gameplay rows explicitly skip.
 
 With the same pre-fix ROM and two-console Vs. input fixture (4,300 emulated
 frames), GUI entry took 58,939 ms with the original adapter and 9,369 ms with
@@ -122,3 +125,13 @@ reuse. Set `MGBA_RING_GUI_BOOT_ROM` to a direct-boot ROM for that test.
 The regular Vs./Battle GUI cases measure 600 video frames after the native
 race counter begins advancing; movement is deferred during that measurement
 so a completed Battle's frozen counter cannot produce a false speed failure.
+
+## Instruction profiles
+
+The CLI profiler observes instructions inside the ordinary CPU run-loop quantum,
+without adding cooperative link yields. Captures identify this with
+`profileScheduling: "quantum"`. Legacy instruction-stepping profiles changed
+scheduling and must not be mixed into performance comparisons. The game-side
+`test_profile.py` compares complete eight-player snapshots and per-video timing
+records with observation enabled and disabled; both are identical. Normal
+GUI/CLI execution continues to use the original uninstrumented run loop.
