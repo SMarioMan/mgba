@@ -27,16 +27,30 @@ windows. This feature does not add network play or connected-session savestates.
 
 The threaded adapter runs cores in shared timestamp order, aligns reset/late
 boot clock epochs, and yields at a bounded interval. Armed transfers shorten
-that interval according to native serial timing. Up to 64 slices execute
+that interval according to native serial timing, capped at 2,048 cycles
+(512 for a fast eight-bit transfer). Up to 4,096 slices execute
 cooperatively on one worker, borrowing only peers actually asleep on the
 adapter's WAIT condition. Interrupt acknowledgements wait until that peer's
 slice finishes. This removes an operating-system thread handoff for each tiny
 serial slice without changing cable timing or timestamp order.
+The worker retains each waiting peer's borrow reservation for the batch and
+caches its clock and serial interval. A new interrupt revokes that reservation
+at the next slice. Serial mode/start changes update the interval; ordinary
+interpreter returns do not rescan every cable port.
 
 Audio/video consumer waits occur outside the cable mutex, on the output owner's
 thread only. A worker yields to a peer needing its consumers instead of waiting
 on that peer's output. This allows GUI pause/reset/close to interrupt the correct
 worker, including when audio/video synchronization is enabled.
+The first cable slot paces the group. Peer outputs use bounded resampling
+correction for independent audio-device clocks. Interpolation runs outside
+the producer mutex, and the existing threaded scanline renderer is enabled
+by default for ring sessions unless explicitly configured otherwise.
+Qt Multimedia ring outputs create their sink, PCM source and timers on a
+dedicated audio worker for each window. Painting and settings dialogs do not
+service those sinks. Stop completes on the worker before releasing its core;
+suspended sinks discard their queued tail instead of draining a corked stream.
+Changing topology recreates the audio outputs with the appropriate pacing.
 
 `test-qt-ring_gui` uses real Qt windows and the File-menu dialog, then supplies
 keypad inputs to each native core. Private fixtures enable Vs./Battle entry for
@@ -45,7 +59,7 @@ human racer IDs, protocol errors, group pause, reset, middle-window removal,
 late boot of a second console, and close/reopen checks. Complete-round and synchronized-physics validation
 remain covered by the headless harness.
 
-BIOS-backed GUI checks passed for both ring modes with two/eight windows and
+The previous release's BIOS-backed GUI checks passed for both ring modes with two/eight windows and
 both standard modes with four windows. Synchronized two- and eight-window
 playback and staggered boot also passed. The final private-fixture run passes
 all 35 CTest targets, including all 13 GUI rows with no skips. A separate launch
@@ -110,7 +124,7 @@ configuration overrides apply to all participants, over their saved settings.
 `--hide-menu` keeps the windows windowed. Press Alt to reveal the menu bar;
 it hides after the menu closes or focus leaves. Ctrl+M toggles its visibility.
 
-The MKSC builder supports `--boot-ring`, `--no-music`, and `--shared-music`.
+The MKSC builder supports `--boot-ring` and `--shared-music`.
 See the ROM's `tools/ring/README.md` for the music policies and build commands.
 
 The ring coordinator aligns reset epochs to a shared LCD-frame boundary.
@@ -119,12 +133,26 @@ starts a timed fallback consumer, so a console cannot stall with a full audio
 buffer after opening multiple windows.
 
 `scriptedLaunch` in the Qt fixture exercises eight unpaused windows, explicit
-`--bios`, hidden menus/Alt, two character cycles via Qt key events, a native
+`--bios`, hidden menus/Alt, character selection via Qt key events, a native
 physics-rate measurement, independent binding persistence, and settings-slot
 reuse. Set `MGBA_RING_GUI_BOOT_ROM` to a direct-boot ROM for that test.
 The regular Vs./Battle GUI cases measure 600 video frames after the native
 race counter begins advancing; movement is deferred during that measurement
 so a completed Battle's frozen counter cannot produce a false speed failure.
+
+For moving, host-clock audio validation, set `MGBA_RING_GUI_AUDIO=1` for
+eight SDL outputs or `MGBA_RING_GUI_AUDIO=qt` for the actual Qt Multimedia
+outputs. Run `ring:vs-8` with a real audio server; the dummy SDL driver does
+not support eight devices. The default measurement lasts 3,600 gameplay
+frames. `MGBA_RING_GUI_AUDIO_FRAMES=18000` extends it to five minutes.
+These checks fail on missing SDL samples or Qt sink underruns, independently
+of the simulation update rate. Run them without concurrent builds or CPU
+stress tests so the result measures the emulator itself.
+Set `MGBA_RING_AUDIO_TRACE=1` to log queue depths at Qt underruns, source-mutex
+waits or interpolation passes exceeding 20 ms, and audio timer gaps over 40 ms.
+These diagnostics are disabled by default. Queued PCM at an underrun separates
+late sink feeding from an empty emulation FIFO; host scheduling must also be
+measured before attributing a long callback to emulator CPU work.
 
 ## Instruction profiles
 

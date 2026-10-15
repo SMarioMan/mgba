@@ -20,6 +20,9 @@ using namespace QGBA;
 DisplayQt::DisplayQt(QWidget* parent)
 	: Display(parent)
 {
+    // paintEvent fills the entire widget, including letterboxing. Avoid an
+    // additional background erase for each of eight software-rendered views.
+    setAttribute(Qt::WA_OpaquePaintEvent);
 	m_backend.init = &DisplayQt::init;
 	m_backend.deinit = &DisplayQt::deinit;
 	m_backend.setLayerDimensions = &DisplayQt::setLayerDimensions;
@@ -88,12 +91,16 @@ void DisplayQt::setMaximumScale(int scale) {
 }
 
 void DisplayQt::framePosted() {
+    if (!m_context) return;
 	// The software renderer consumes the frame on the GUI thread, just like
 	// the GL renderer does on its drawing thread. Release producers waiting
 	// for video synchronization after accepting the posted frame.
 	struct mCoreSync* sync = &m_context->thread()->impl->sync;
-	mCoreSyncWaitFrameStart(sync);
+    bool posted = mCoreSyncWaitFrameStart(sync);
 	mCoreSyncWaitFrameEnd(sync);
+    // One notification can consume the latest of several queued frames.
+    // Later stale notifications must not repeat image conversion/painting.
+    if (!posted) return;
 	update();
 	const mColor* buffer = m_context->drawContext();
 	if (const_cast<const QImage&>(m_layers[VIDEO_LAYER_IMAGE]).bits() == reinterpret_cast<const uchar*>(buffer)) {

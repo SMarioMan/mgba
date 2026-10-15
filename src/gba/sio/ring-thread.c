@@ -9,6 +9,8 @@
 #endif
 
 #define RING_IDLE_QUANTUM 16384
+#define RING_TRANSFER_QUANTUM 2048
+#define RING_EXECUTOR_SLICES 4096
 
 static int64_t _resetEpoch(struct GBASIORingThreadCoordinator* coordinator) {
 	/* A new console may open while other windows are already executing.
@@ -17,17 +19,29 @@ static int64_t _resetEpoch(struct GBASIORingThreadCoordinator* coordinator) {
 	return ((coordinator->clock + VIDEO_TOTAL_LENGTH - 1) / VIDEO_TOTAL_LENGTH) * VIDEO_TOTAL_LENGTH;
 }
 
-static unsigned _interval(struct GBASIORingThreadCoordinator* coordinator) {
-	unsigned interval = RING_IDLE_QUANTUM;
-	for (unsigned i = 0; i < coordinator->ring.count; ++i) {
-		struct GBASIO* sio = coordinator->nodes[i]->driver.d.p;
-		if ((sio->mode == GBA_SIO_NORMAL_8 || sio->mode == GBA_SIO_NORMAL_32) && GBASIONormalIsStart(sio->siocnt)) {
-			unsigned cycles = GBASIOTransferCycles(sio->mode, sio->siocnt, 1) / 4;
-			if (cycles > 512) cycles = 512;
-			if (cycles < interval) interval = cycles;
-		}
+static unsigned _nodeInterval(struct GBASIORingThreadNode* node) {
+	struct GBASIO* sio = node->driver.d.p;
+	if ((sio->mode == GBA_SIO_NORMAL_8 || sio->mode == GBA_SIO_NORMAL_32) && GBASIONormalIsStart(sio->siocnt)) {
+		/* Serial completion events still stop runLoop at the wire edge.
+		 * A separate quarter-word quantum only adds dispatch/locking. */
+		unsigned cycles = GBASIOTransferCycles(sio->mode, sio->siocnt, 1);
+		if (cycles > RING_TRANSFER_QUANTUM) cycles = RING_TRANSFER_QUANTUM;
+		return cycles;
 	}
-	return interval;
+	return RING_IDLE_QUANTUM;
+}
+
+static void _refreshInterval(struct GBASIORingThreadCoordinator* coordinator) {
+	unsigned interval = RING_IDLE_QUANTUM;
+	for (unsigned i = 0; i < coordinator->ring.count; ++i)
+		if (coordinator->nodes[i]->interval < interval) interval = coordinator->nodes[i]->interval;
+	if (interval == coordinator->interval) return;
+	coordinator->interval = interval;
+	for (unsigned i = 0; i < coordinator->ring.count; ++i) {
+		struct GBASIORingThreadNode* peer = coordinator->nodes[i];
+		mTimingDeschedule(peer->thread->core->timing, &peer->quantum);
+		mTimingSchedule(peer->thread->core->timing, &peer->quantum, interval);
+	}
 }
 
 static struct GBASIORingThreadNode* _node(struct mCoreThread* thread) {
@@ -48,6 +62,18 @@ static struct GBASIORingThreadNode* _next(struct GBASIORingThreadCoordinator* co
 	return next;
 }
 
+/* During an exclusive batch, only the executed CPU can advance its clock.
+ * Cross-core cable events update event deadlines, never CPU elapsed cycles. */
+static struct GBASIORingThreadNode* _nextBatch(struct GBASIORingThreadCoordinator* coordinator) {
+    struct GBASIORingThreadNode* next = NULL;
+    int64_t earliest = INT64_MAX;
+    for (unsigned i = 0; i < coordinator->ring.count; ++i) {
+        struct GBASIORingThreadNode* node = coordinator->nodes[i];
+        if (node->clock < earliest) { earliest = node->clock; next = node; }
+    }
+    return next;
+}
+
 static void _yield(struct mTiming* timing, void* context, uint32_t late) {
 	UNUSED(late);
 	struct GBASIORingThreadNode* node = context;
@@ -65,19 +91,20 @@ static void _advance(struct mCoreThread* thread) {
 #endif
 	thread->core->runLoop(thread->core);
 	thread->impl->sync.deferWait = false;
-	if (_time(node) > coordinator->clock) coordinator->clock = _time(node);
-	unsigned interval = _interval(coordinator);
-	if (interval != coordinator->interval) {
-		coordinator->interval = interval;
-		for (unsigned i = 0; i < coordinator->ring.count; ++i) {
-			struct GBASIORingThreadNode* peer = coordinator->nodes[i];
-			mTimingDeschedule(peer->thread->core->timing, &peer->quantum);
-			mTimingSchedule(peer->thread->core->timing, &peer->quantum, interval);
-		}
-	}
+	node->clock = _time(node);
+	if (node->clock > coordinator->clock) coordinator->clock = node->clock;
+	/* Only this CPU can arm a shorter transfer during its slice. Completion
+	 * callbacks can clear a peer's start bit; its cached shorter interval is
+	 * conservative until that peer next runs. Avoid rescanning every port on
+	 * every interpreter return while the cable configuration is unchanged. */
+	unsigned demand = _nodeInterval(node);
+	if (demand == node->interval) return;
+	node->interval = demand;
+	_refreshInterval(coordinator);
 }
 
 static bool _outputReady(struct mCoreThread* thread) {
+    if (_node(thread)->driver.slot) return true;
 	struct mCoreSync* sync = &thread->impl->sync;
 	MutexLock(&sync->videoFrameMutex);
 	bool ready = !sync->videoFrameWait || !sync->videoFramePending;
@@ -93,18 +120,41 @@ static bool _outputReady(struct mCoreThread* thread) {
 static void _run(struct mCoreThread* thread) {
 	struct GBASIORingThreadNode* node = _node(thread);
 	struct GBASIORingThreadCoordinator* coordinator = node->coordinator;
+    MutexLock(&thread->impl->stateMutex);
+    bool running = thread->impl->state == mTHREAD_RUNNING && !thread->impl->requested && !thread->impl->interruptDepth;
+    if (running) ATOMIC_STORE(thread->impl->borrowStop, 0);
+    MutexUnlock(&thread->impl->stateMutex);
+    if (!running) return;
 	mCoreSyncWaitDeferred(&thread->impl->sync, thread->core->getAudioBuffer(thread->core));
-	MutexLock(&coordinator->mutex);
-	struct GBASIORingThreadNode* next = _next(coordinator);
+    MutexLock(&coordinator->mutex);
+	for (unsigned i = 0; i < coordinator->ring.count; ++i) {
+        coordinator->nodes[i]->clock = _time(coordinator->nodes[i]);
+        coordinator->nodes[i]->interval = _nodeInterval(coordinator->nodes[i]);
+    }
+    _refreshInterval(coordinator);
+	struct GBASIORingThreadNode* next = _nextBatch(coordinator);
+	bool borrowed[GBA_RING_MAX_PLAYERS] = {false};
 	/* Execute short serial slices cooperatively while the other owning
 	 * threads sleep on WAIT. Preserve the same timestamp ordering without
 	 * paying for a kernel thread handoff for each 32-bit cable word. */
-	for (unsigned slice = 0; next && slice < 64; ++slice) {
+	for (unsigned slice = 0; next && slice < RING_EXECUTOR_SLICES; ++slice) {
+        int interrupted;
+        ATOMIC_LOAD(interrupted, thread->impl->borrowStop);
+        if (interrupted) break;
 		if (!_outputReady(next->thread)) break;
 		if (next == node) _advance(thread);
-		else if (!mCoreThreadRunWaiting(next->thread, _advance)) break;
-		next = _next(coordinator);
+		else {
+            unsigned slot = next->driver.slot;
+            if (!borrowed[slot]) {
+                if (!mCoreThreadBorrowWaiting(next->thread)) break;
+                borrowed[slot] = true;
+            }
+            if (!mCoreThreadRunBorrowed(next->thread, _advance)) break;
+        }
+		next = _nextBatch(coordinator);
 	}
+	for (unsigned i = 0; i < coordinator->ring.count; ++i)
+		if (borrowed[i]) mCoreThreadReturnBorrowed(coordinator->nodes[i]->thread);
 	if (next != node) mCoreThreadWaitFromThread(thread);
 	if (next) mCoreThreadStopWaiting(next->thread);
 	MutexUnlock(&coordinator->mutex);
@@ -113,6 +163,10 @@ static void _run(struct mCoreThread* thread) {
 	/* Only the output owner's thread may block on its consumers. GUI
 	 * interruption wakes that thread's sync conditions, never another core's. */
 	mCoreSyncWaitDeferred(&thread->impl->sync, thread->core->getAudioBuffer(thread->core));
+}
+
+bool GBASIORingThreadIsAttached(const struct mCoreThread* thread) {
+	return thread && thread->runLoopOverride == _run;
 }
 
 static void _reset(struct mCoreThread* thread) {
@@ -153,6 +207,7 @@ bool GBASIORingThreadAttach(struct GBASIORingThreadCoordinator* coordinator, str
 		node->thread = thread;
 		node->coordinator = coordinator;
 		coordinator->nodes[node->driver.slot] = node;
+        mCoreSyncSetExternalPacing(&thread->impl->sync, node->driver.slot != 0);
 		node->driver.timeOffset = _resetEpoch(coordinator) - mTimingGlobalTime(thread->core->timing);
 		node->quantum.context = node;
 		node->quantum.callback = _yield;
@@ -177,9 +232,13 @@ void GBASIORingThreadDetach(struct GBASIORingThreadNode* node) {
 	mTimingDeschedule(node->thread->core->timing, &node->quantum);
 	node->thread->runLoopOverride = NULL;
 	node->thread->resetOverride = NULL;
+    mCoreSyncSetExternalPacing(&node->thread->impl->sync, false);
 	GBASIORingDetach(&node->driver);
 	for (unsigned i = slot; i < coordinator->ring.count; ++i) coordinator->nodes[i] = coordinator->nodes[i + 1];
 	coordinator->nodes[coordinator->ring.count] = NULL;
+	for (unsigned i = 0; i < coordinator->ring.count; ++i) {
+		mCoreSyncSetExternalPacing(&coordinator->nodes[i]->thread->impl->sync, i != 0);
+	}
 	mCoreThreadStopWaiting(node->thread);
 	struct GBASIORingThreadNode* next = _next(coordinator);
 	if (next) mCoreThreadStopWaiting(next->thread);

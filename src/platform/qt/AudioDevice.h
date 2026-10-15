@@ -8,6 +8,9 @@
 #include <QAudioFormat>
 #include <QIODevice>
 #include <QTimer>
+#include <QMutex>
+#include <QElapsedTimer>
+#include <atomic>
 
 #include <mgba-util/audio-buffer.h>
 #include <mgba-util/audio-resampler.h>
@@ -23,6 +26,9 @@ public:
 	AudioDevice(QObject* parent = nullptr);
 	virtual ~AudioDevice();
 
+    uint64_t deliveredFrames() const { return m_deliveredFrames.load(); }
+    void resetDeliveryStats() { m_deliveredFrames.store(0); }
+    void traceUnderrun();
 	void setInput(mCoreThread* input);
 	void setFormat(const QAudioFormat& format);
 	void setBufferSamples(int samples);
@@ -39,14 +45,23 @@ private slots:
 	void update();
 
 private:
+    std::atomic<uint64_t> m_deliveredFrames{0};
 	size_t m_samples = 512;
 	QAudioFormat m_format;
 	mCoreThread* m_context;
+    bool m_ringBuffered = false;
+    bool m_traceAudio = false;
+    QElapsedTimer m_traceClock;
+    qint64 m_previousUpdate = 0;
 	mAudioBuffer m_buffer;
+	mAudioBuffer m_inputBuffer;
+	mutable QMutex m_audioMutex;
 	mAudioResampler m_resampler;
 	mutable QTimer m_updateTimer;
 
 	void adjustResampler();
+	void processAudio();
+	void publishQueueDepth();
 };
 
 }

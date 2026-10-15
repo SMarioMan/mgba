@@ -109,6 +109,8 @@ Window::Window(CoreManager* manager, ConfigController* config, int playerId, QWi
 	setAcceptDrops(true);
 	setAttribute(Qt::WA_DeleteOnClose);
 	updateTitle();
+	connect(GBAApp::app()->multiplayer(), &MultiplayerController::topologyChanged,
+	        this, &Window::reloadAudioDriver);
 
 	m_logo.setDevicePixelRatio(m_screenWidget->devicePixelRatio());
 	m_logo = m_logo; // Free memory left over in old pixmap
