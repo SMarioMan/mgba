@@ -15,6 +15,9 @@
 #include <mgba/internal/gba/sio/ring-thread.h>
 #endif
 #include <mgba/internal/gba/audio.h>
+#ifdef M_CORE_GBA
+#include <mgba/internal/gba/gba.h>
+#endif
 
 #include <QDebug>
 #include <QDateTime>
@@ -49,13 +52,21 @@ void AudioDevice::traceUnderrun() {
     mCoreSync* sync = &m_context->impl->sync;
     mCoreSyncLockAudio(sync);
     size_t source = mAudioBufferAvailable(m_context->core->getAudioBuffer(m_context->core));
+    size_t capacity = mAudioBufferCapacity(m_context->core->getAudioBuffer(m_context->core));
+    unsigned rate = m_context->core->audioSampleRate(m_context->core);
+    uint64_t dropped = 0;
+#ifdef M_CORE_GBA
+    if (m_context->core->platform(m_context->core) == mPLATFORM_GBA)
+        dropped = static_cast<GBA*>(m_context->core->board)->audio.droppedSamples;
+#endif
     size_t threshold = sync->audioHighWater;
     mCoreSyncUnlockAudio(sync);
-    qInfo("Audio underrun at %lld ms: device=%p delivered=%llu core=%zu input=%zu output=%zu threshold=%zu prefetchedBytes=%lld",
+    qInfo("Audio underrun at %lld ms: device=%p delivered=%llu core=%zu input=%zu output=%zu threshold=%zu prefetchedBytes=%lld capacity=%zu sourceRate=%u dropped=%llu",
         static_cast<long long>(QDateTime::currentMSecsSinceEpoch()), static_cast<void*>(this),
         static_cast<unsigned long long>(deliveredFrames()), source,
         mAudioBufferAvailable(&m_inputBuffer), mAudioBufferAvailable(&m_buffer), threshold,
-        static_cast<long long>(QIODevice::bytesAvailable()));
+        static_cast<long long>(QIODevice::bytesAvailable()), capacity, rate,
+        static_cast<unsigned long long>(dropped));
 }
 
 void AudioDevice::setFormat(const QAudioFormat& format) {
@@ -88,6 +99,13 @@ void AudioDevice::setInput(mCoreThread* input) {
 #endif
 }
 
+void AudioDevice::setPollingMode(bool polling) {
+    QMutexLocker lock(&m_audioMutex);
+    m_pollingMode = polling;
+    if (polling) m_updateTimer.stop();
+    setOpenMode(polling ? ReadOnly | Unbuffered : ReadOnly);
+}
+
 qint64 AudioDevice::readData(char* data, qint64 maxSize) {
 	QMutexLocker lock(&m_audioMutex);
 	if (!m_context || !m_context->core) {
@@ -112,7 +130,7 @@ qint64 AudioDevice::readData(char* data, qint64 maxSize) {
 	mAudioBufferRead(&m_buffer, reinterpret_cast<int16_t*>(data), available);
 	m_deliveredFrames.fetch_add(available);
     publishQueueDepth();
-	m_updateTimer.start();
+	if (!m_pollingMode) m_updateTimer.start();
 	return available * sizeof(mStereoSample);
 }
 
@@ -130,7 +148,7 @@ qint64 AudioDevice::bytesAvailable() const {
 	if (!m_context || !m_context->core) {
 		return true;
 	}
-	m_updateTimer.start();
+	if (!m_pollingMode) m_updateTimer.start();
 	int available = mAudioBufferAvailable(&m_buffer);
 	return available * sizeof(mStereoSample);
 }
@@ -142,7 +160,7 @@ qint64 AudioDevice::bytesAvailable() {
 	}
     processAudio();
     int available = mAudioBufferAvailable(&m_buffer);
-	m_updateTimer.start();
+	if (!m_pollingMode) m_updateTimer.start();
 	return available * sizeof(mStereoSample);
 }
 

@@ -88,6 +88,8 @@ struct GBAAudio {
 	int masterVolume;
 
 	struct mTimingEvent sampleEvent;
+	/* Host PCM FIFO loss diagnostic; deliberately not part of save states. */
+	uint64_t droppedSamples;
 };
 
 struct GBAMP2kADSR {

@@ -10,6 +10,7 @@
 #include "LogController.h"
 
 #include <QAudioOutput>
+#include <QDateTime>
 #if (QT_VERSION >= QT_VERSION_CHECK(6, 0, 0))
 #include <QMediaDevices>
 #endif
@@ -25,6 +26,8 @@ using namespace QGBA;
 AudioProcessorQt::AudioProcessorQt(QObject* parent)
 	: AudioProcessor(parent)
 {
+    m_tracePump = qEnvironmentVariableIsSet("MGBA_RING_AUDIO_TRACE");
+    m_pumpClock.start();
 }
 
 AudioProcessorQt::~AudioProcessorQt() {
@@ -71,6 +74,11 @@ void AudioProcessorQt::stop() {
 }
 
 void AudioProcessorQt::stopOutput() {
+    m_audioPump.reset();
+    m_pushDevice = nullptr;
+    m_pendingPCM.clear();
+    m_previousPump = 0;
+    m_waitingForPCM = m_sinkHasPlayed = m_recoverQueued = false;
 	if (m_audioOutput) {
 		// Discard queued playback when a core stops. Draining a suspended
 		// PulseAudio sink can wait forever because its stream is corked.
@@ -122,6 +130,9 @@ bool AudioProcessorQt::start() {
 		m_audioOutput->setBufferSize(bufferBytes);
 #endif
 #if (QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
+        if (m_worker) m_audioOutput->setBufferSize(m_sampleRate / 10 * sizeof(mStereoSample));
+#endif
+#if (QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
         connect(m_audioOutput.get(), &QAudioOutput::stateChanged, m_worker ? m_worker : this,
 #else
         connect(m_audioOutput.get(), &QAudioSink::stateChanged, m_worker ? m_worker : this,
@@ -129,22 +140,129 @@ bool AudioProcessorQt::start() {
                 [this](QAudio::State state) {
             // Qt backends differ in whether starvation also sets UnderrunError.
             // After delivery begins, any Idle transition means the sink ran dry.
-            if (state == QAudio::IdleState && m_device && m_device->deliveredFrames()) {
+            if (state == QAudio::ActiveState) m_sinkHasPlayed = true;
+            if (state == QAudio::IdleState && m_sinkHasPlayed && !m_waitingForPCM && m_device && m_device->deliveredFrames()) {
                 m_underrunEvents.fetch_add(1);
                 m_device->traceUnderrun();
+                if (m_audioPump && !m_recoverQueued) {
+                    m_recoverQueued = true;
+                    // A starved backend may keep its read clock ahead of the
+                    // incoming stream. Restart its queue before re-priming,
+                    // otherwise every small write can underflow again.
+                    QMetaObject::invokeMethod(m_worker, [this]() {
+                        if (!m_recoverQueued || !m_audioOutput) return;
+                        m_recoverQueued = false;
+                        m_pushDevice = nullptr;
+                        m_waitingForPCM = true;
+                        m_sinkHasPlayed = false;
+                        m_audioOutput->reset();
+                        primeOutput();
+                    }, Qt::QueuedConnection);
+                }
             }
         });
 	}
 
+    if (m_waitingForPCM && m_audioPump) {
+        pumpAudio();
+        m_audioPump->start();
+        return true;
+    }
 	if (m_audioOutput->state() == QAudio::SuspendedState) {
 		m_audioOutput->resume();
+        if (m_audioPump) m_audioPump->start();
 	} else {
 		m_device->setBufferSamples(m_samples);
 		m_device->setInput(input());
 		m_device->setFormat(m_audioOutput->format());
-		m_audioOutput->start(m_device.get());
+        if (m_worker) {
+            // Qt's pull adapter may feed only once per 20 ms. Independent
+            // linked outputs need less callback jitter, without increasing
+            // latency. Poll on the audio worker every 5 ms instead; this
+            // also replaces each source's separate 1 ms refill timer.
+            m_device->setPollingMode(true);
+            m_recoverQueued = false;
+            if (!primeOutput()) return false;
+            if (!m_audioPump) {
+                m_audioPump = std::make_unique<QTimer>(m_worker);
+                m_audioPump->setTimerType(Qt::PreciseTimer);
+                m_audioPump->setInterval(5);
+                connect(m_audioPump.get(), &QTimer::timeout, m_worker, [this]() { pumpAudio(); });
+            }
+            pumpAudio();
+            m_audioPump->start();
+        } else m_audioOutput->start(m_device.get());
 	}
-	return m_audioOutput->state() == QAudio::ActiveState && m_audioOutput->error() == QAudio::NoError;
+    // A push sink starts idle until its paused core supplies the first PCM.
+	return (m_waitingForPCM || m_audioOutput->state() == QAudio::ActiveState ||
+            (m_pushDevice && m_audioOutput->state() == QAudio::IdleState)) &&
+            m_audioOutput->error() == QAudio::NoError;
+}
+
+bool AudioProcessorQt::primeOutput() {
+    m_waitingForPCM = true;
+    m_sinkHasPlayed = false;
+    m_pushDevice = m_audioOutput->start();
+    if (!m_pushDevice) {
+        m_waitingForPCM = false;
+        return false;
+    }
+    // Open now so startup failures still reach the normal driver fallback,
+    // but stop the device clock while an attached core is paused/loading.
+    m_audioOutput->suspend();
+    m_sinkHasPlayed = false;
+    return true;
+}
+
+void AudioProcessorQt::pumpAudio() {
+    if (!m_device || !m_audioOutput) return;
+    qint64 started = m_tracePump ? m_pumpClock.nsecsElapsed() : 0;
+    if (m_tracePump && m_previousPump && started - m_previousPump > 20000000)
+        qInfo("Qt audio pump gap at %lld ms: output=%p gap=%.2f ms free=%lld buffer=%lld pending=%d",
+              static_cast<long long>(QDateTime::currentMSecsSinceEpoch()), static_cast<void*>(this),
+              (started - m_previousPump) / 1000000.0,
+              static_cast<long long>(m_audioOutput->bytesFree()),
+              static_cast<long long>(m_audioOutput->bufferSize()), int(m_pendingPCM.size()));
+    m_previousPump = started;
+    // Drain the emulation FIFO even while the hardware queue is full. Peer
+    // cores follow the ring clock and cannot wait for their individual sink;
+    // leaving PCM in their small core FIFO would discard generated samples.
+    qint64 queued = m_device->bytesAvailable() + m_pendingPCM.size();
+    if (m_waitingForPCM) {
+        // A newly attached core can remain paused during menu/topology setup.
+        // Starting the hardware clock then creates a lasting playback deficit
+        // on an independently paced peer. Prime the existing 100 ms budget.
+        size_t primeFrames = std::min(size_t(m_sampleRate / 10), m_device->bufferCapacity());
+        if (queued < qint64(primeFrames * sizeof(mStereoSample))) return;
+        m_sinkHasPlayed = false;
+        m_audioOutput->resume();
+        m_waitingForPCM = false;
+    }
+    if (!m_pushDevice) return;
+    qint64 sourceDone = m_tracePump ? m_pumpClock.nsecsElapsed() : 0;
+    qint64 available = m_audioOutput->bytesFree();
+    while (available >= qint64(sizeof(mStereoSample))) {
+        if (m_pendingPCM.isEmpty()) {
+            qint64 count = std::min<qint64>(available, 4096);
+            count -= count % sizeof(mStereoSample);
+            m_pendingPCM = m_device->read(count);
+            if (m_pendingPCM.isEmpty()) break;
+        }
+        qint64 written = m_pushDevice->write(m_pendingPCM.constData(),
+            std::min<qint64>(available, m_pendingPCM.size()));
+        if (written <= 0) break;
+        // A partial backend write retains the rest for the next callback.
+        m_pendingPCM.remove(0, int(written));
+        available = m_audioOutput->bytesFree();
+    }
+    if (m_tracePump) {
+        qint64 finished = m_pumpClock.nsecsElapsed();
+        if (finished - started > 20000000)
+            qInfo("Qt audio pump delay at %lld ms: output=%p source=%.2f backend=%.2f ms free=%lld buffer=%lld",
+                  static_cast<long long>(QDateTime::currentMSecsSinceEpoch()), static_cast<void*>(this),
+                  (sourceDone - started) / 1000000.0, (finished - sourceDone) / 1000000.0,
+                  static_cast<long long>(available), static_cast<long long>(m_audioOutput->bufferSize()));
+    }
 }
 
 uint64_t AudioProcessorQt::deliveredFrames() const {
@@ -170,6 +288,7 @@ void AudioProcessorQt::pause() {
         QMetaObject::invokeMethod(m_worker, [this]() { pause(); }, Qt::BlockingQueuedConnection);
         return;
     }
+	if (m_audioPump) m_audioPump->stop();
 	if (m_audioOutput) {
 		m_audioOutput->suspend();
 	}

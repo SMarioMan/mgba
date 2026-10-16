@@ -135,11 +135,14 @@ static void captureFrame(void* context) {
                 if (red == green && green == blue && red >= 80 && red <= 160) ++skyRoadPixels;
             }
         unsigned lap = 0, starMask = 0, shrinkMask = 0, booMask = 0;
+        uint32_t kartPositions[8] = { 0 };
         unsigned count = player->core->rawRead8(player->core, 0x03003634, -1);
         if (count > 8) count = 0;
         for (unsigned i = 0; i < count; ++i) {
             uint32_t driver = player->core->rawRead32(player->core, 0x03003638 + i*4, -1);
             if (driver >= 0x02000000 && driver < 0x03007000) {
+                kartPositions[i] = (2166136261U ^ (player->core->rawRead32(player->core, driver, -1) >> 16)) * 16777619U;
+                kartPositions[i] = (kartPositions[i] ^ (player->core->rawRead32(player->core, driver + 4, -1) >> 16)) * 16777619U;
                 if ((int16_t)player->core->rawRead16(player->core, driver + 0x6A, -1) > 0) starMask |= 1U << i;
                 if ((int16_t)player->core->rawRead16(player->core, driver + 0x66, -1) > 0) booMask |= 1U << i;
                 if ((int16_t)player->core->rawRead16(player->core, driver + 0x68, -1) > 0) shrinkMask |= 1U << i;
@@ -162,6 +165,7 @@ static void captureFrame(void* context) {
                     0x03004FE0 + displayBank * 0x600 + offset, -1)) * 16777619U;
         } else roadProjectionHash = 0;
         fprintf(videoLog, ",%u,%u,%u", displayBank, writeBank, roadProjectionHash);
+        for (unsigned i = 0; i < 8; ++i) fprintf(videoLog, ",%u", kartPositions[i]);
         if (soundTable) {
             uint32_t camera = player->core->rawRead32(player->core, 0x03003658, -1);
             bool validCamera = (camera >= 0x02000000 && camera < 0x0203FE00) || (camera >= 0x03000000 && camera < 0x03007E00);
@@ -616,6 +620,7 @@ int main(int argc, char** argv) {
 		videoLog = fopen(videoPath, "w");
 		if (!videoLog) { perror(videoPath); goto done; }
         fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus,menuCursors,starMask,shrinkMask,booMask,roadDisplayBuffer,roadWriteBuffer,roadProjectionHash");
+        for (unsigned i = 0; i < 8; ++i) fprintf(videoLog, ",kartPosition%u", i);
         if (soundTable) fprintf(videoLog, ",localPlayer,cameraPlayer,fifoSource,pcmBufferEnd,pcmCounter,soundIdent,engineHeader,voiceHeader,effectHeader");
         if (timingState) fprintf(videoLog, ",exchangeCycles,renderCycles,profileFrame,publishCycles,mixCycles");
         if (audioState) {

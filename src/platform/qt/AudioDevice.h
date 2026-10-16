@@ -29,6 +29,8 @@ public:
     uint64_t deliveredFrames() const { return m_deliveredFrames.load(); }
     void resetDeliveryStats() { m_deliveredFrames.store(0); }
     void traceUnderrun();
+    void setPollingMode(bool polling);
+    size_t bufferCapacity() const { return mAudioBufferCapacity(&m_buffer); }
 	void setInput(mCoreThread* input);
 	void setFormat(const QAudioFormat& format);
 	void setBufferSamples(int samples);
@@ -50,6 +52,7 @@ private:
 	QAudioFormat m_format;
 	mCoreThread* m_context;
     bool m_ringBuffered = false;
+    bool m_pollingMode = false;
     bool m_traceAudio = false;
     QElapsedTimer m_traceClock;
     qint64 m_previousUpdate = 0;

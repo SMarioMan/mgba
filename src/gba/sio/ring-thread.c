@@ -24,6 +24,7 @@ static unsigned _nodeInterval(struct GBASIORingThreadNode* node) {
 	if ((sio->mode == GBA_SIO_NORMAL_8 || sio->mode == GBA_SIO_NORMAL_32) && GBASIONormalIsStart(sio->siocnt)) {
 		/* Serial completion events still stop runLoop at the wire edge.
 		 * A separate quarter-word quantum only adds dispatch/locking. */
+		if (sio->mode == GBA_SIO_NORMAL_32) return RING_TRANSFER_QUANTUM;
 		unsigned cycles = GBASIOTransferCycles(sio->mode, sio->siocnt, 1);
 		if (cycles > RING_TRANSFER_QUANTUM) cycles = RING_TRANSFER_QUANTUM;
 		return cycles;

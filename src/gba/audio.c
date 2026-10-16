@@ -26,6 +26,7 @@ static int _applyBias(struct GBAAudio* audio, int sample);
 static void _sample(struct mTiming* timing, void* user, uint32_t cyclesLate);
 
 void GBAAudioInit(struct GBAAudio* audio, size_t samples) {
+	audio->droppedSamples = 0;
 	audio->sampleEvent.context = audio;
 	audio->sampleEvent.name = "GBA Audio Sample";
 	audio->sampleEvent.callback = _sample;
@@ -415,7 +416,8 @@ static void _sample(struct mTiming* timing, void* user, uint32_t cyclesLate) {
 	memset(audio->chB.samples, audio->chB.samples[samples - 1], sizeof(audio->chB.samples));
 
 	mCoreSyncLockAudio(audio->p->sync);
-	mAudioBufferWrite(&audio->psg.buffer, (int16_t*) audio->currentSamples, samples);
+	size_t queued = mAudioBufferWrite(&audio->psg.buffer, (int16_t*) audio->currentSamples, samples);
+	if (queued < (unsigned) samples) audio->droppedSamples += samples - queued;
 	if (audio->p->stream) {
 		if (audio->p->stream->postAudioFrame) {
 			int i;
