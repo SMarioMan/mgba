@@ -21,6 +21,7 @@
 #include <QInputDialog>
 #include <QTimer>
 #include <QTemporaryDir>
+#include <QPointer>
 #include <QTest>
 #include <atomic>
 #include <chrono>
@@ -386,6 +387,10 @@ private slots:
 			controller->thread()->core->addCoreCallbacks(controller->thread()->core, &callbacks);
 			window->setController(controller);
 			QTRY_VERIFY_WITH_TIMEOUT(controller->hasStarted(), 10000);
+            // The core starts before Window::gameStarted's queued signal.
+            // Wait for its audio setup before topology changes can recreate
+            // the output; otherwise the test retains a startup-era pointer.
+            QTRY_VERIFY_WITH_TIMEOUT(window->audioProcessor(), 10000);
 			if (lateBoot && !i) {
 				controller->setPaused(false);
 				// The GUI counter briefly holds UINT64_MAX during reset. Wait for
@@ -406,6 +411,7 @@ private slots:
 			QVERIFY(app->multiplayer()->setRingTopology(true));
 		}
         bool audioMeasured = false;
+        uint64_t initialDroppedSamples[8] = {};
 #ifdef BUILD_SDL
         struct AudioOutput {
             mSDLAudio device{};
@@ -432,7 +438,7 @@ private slots:
         QVERIFY2(!sdlAudioCheck, "SDL delivery validation requires the SDL backend");
 #endif
 #ifdef BUILD_QT_MULTIMEDIA
-        AudioProcessorQt* qtAudio[8] = {};
+        QPointer<AudioProcessorQt> qtAudio[8];
         if (qtAudioCheck) {
             for (int i = 0; i < players; ++i) {
                 QTRY_VERIFY_WITH_TIMEOUT(windows[i]->audioProcessor(), 10000);
@@ -465,6 +471,10 @@ private slots:
                 }
                 if (allRacing && !audioMeasured) {
                     for (int i = 0; i < players; ++i) {
+                        mCoreThread* thread = windows[i]->controller()->thread();
+                        mCoreSyncLockAudio(&thread->impl->sync);
+                        initialDroppedSamples[i] = static_cast<GBA*>(thread->core->board)->audio.droppedSamples;
+                        mCoreSyncUnlockAudio(&thread->impl->sync);
 #ifdef BUILD_SDL
                         if (sdlAudioCheck) {
                             mSDLPauseAudio(&audio[i].device);
@@ -474,10 +484,9 @@ private slots:
 #endif
 #ifdef BUILD_QT_MULTIMEDIA
                         if (qtAudioCheck) {
-                            if (qtAudio[i]->thread() == QThread::currentThread()) qtAudio[i]->resetDeliveryStats();
-                            else QMetaObject::invokeMethod(qtAudio[i], [&, i]() {
-                                qtAudio[i]->resetDeliveryStats();
-                            }, Qt::BlockingQueuedConnection);
+                            QVERIFY(qtAudio[i]);
+                            QCOMPARE(windows[i]->audioProcessor(), qtAudio[i].data());
+                            qtAudio[i]->resetDeliveryStats();
                         }
 #endif
                     }
@@ -501,7 +510,10 @@ private slots:
                     if (sdlAudioCheck) mSDLPauseAudio(&audio[i].device);
 #endif
 #ifdef BUILD_QT_MULTIMEDIA
-                    if (qtAudioCheck) qtAudio[i]->pause();
+                    if (qtAudioCheck) {
+                        QVERIFY(qtAudio[i]);
+                        qtAudio[i]->pause();
+                    }
 #endif
                 }
             }
@@ -553,6 +565,11 @@ private slots:
                     qInfo("GUI player %d: %.3f updates/video frame, %.2f video frames/wall second", i + 1, rate, inputs[i].wallFramesPerSecond);
                     if (audioCheck) qInfo("GUI player %d: longest host frame gap %.2f ms, %u gaps above 25 ms", i + 1, inputs[i].longestFrameGapMs, inputs[i].delayedHostFrames);
                     QVERIFY2(rate >= 0.95, "GUI gameplay runs below 95% speed");
+                    if (audioCheck) {
+                        uint64_t dropped = gba->audio.droppedSamples - initialDroppedSamples[i];
+                        qInfo("GUI source P%d: %llu dropped PCM samples", i + 1, (unsigned long long)dropped);
+                        QVERIFY2(!dropped, "The emulation FIFO discarded generated PCM");
+                    }
                 }
 				if (ringTopology) {
 					QCOMPARE(core->rawRead32(core, 0x03006B98, -1), 0U); // Protocol errors
@@ -642,6 +659,11 @@ int main(int argc, char** argv) {
     bool audioCheck = qtAudio || qEnvironmentVariableIntValue("MGBA_RING_GUI_AUDIO");
     if (qtAudio) config.setQtOption("audioDriver", 0);
     else if (audioCheck || qEnvironmentVariableIntValue("MGBA_RING_GUI_MOTION")) config.setQtOption("audioDriver", -1);
+    if (qEnvironmentVariableIsSet("MGBA_RING_GUI_SAMPLE_RATE")) {
+        int rate = qEnvironmentVariableIntValue("MGBA_RING_GUI_SAMPLE_RATE");
+        if (rate < 8000 || rate > 192000) return 1;
+        config.setOption("sampleRate", rate);
+    }
 	bool sync = qEnvironmentVariableIntValue("MGBA_RING_GUI_SYNC") != 0;
 	config.setOption("audioSync", sync);
 	config.setOption("videoSync", sync);

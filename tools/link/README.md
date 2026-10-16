@@ -5,8 +5,8 @@ For local Qt windows, see [GUI ring linking](GUI.md).
 Enable `BUILD_TEST=ON`, `BUILD_HEADLESS=ON`, and `BUILD_SUITE=ON` in CMake.
 `mgba-link` uses the existing core and stock lockstep driver for 2–4 consoles;
 `--ring` uses the independent normal-serial ring driver for 1–8 consoles.
-One console supports the MKSC variant's solo Grand Prix test path; GUI ring
-launches still require 2–8 consoles.
+One console is useful for protocol loopback tests; the MKSC ring menus and GUI
+ring launches require 2–8 consoles.
 A valid 16 KiB external BIOS and BIOS boot are the default validation path.
 Pass either `--bios FILE` or `--hle`; the latter explicitly exercises mGBA's
 built-in BIOS implementation without loading an external BIOS. The runner
@@ -205,3 +205,23 @@ stationary. It does not change race RAM, software player IDs, or CPU flags.
 `--until-watch-value` comparisons, including automatic results confirmation.
 Its default is `0xFFFFFFFF`. This allows a scene snapshot at a byte-sized game
 event without writing game memory or guessing a video-frame number.
+
+The Qt adapter allows a 2,048-cycle slice for armed normal-32 transfers.
+The per-core serial completion event still stops execution at the transfer
+edge; normal-8 retains its shorter transfer interval. This avoids repeated
+dispatch and borrower locking without changing transfer timing.
+
+Ring Qt audio outputs have separate worker threads and use a 5 ms push feeder.
+The feeder drains the core FIFO even while the device queue is full, and
+primes the existing 100 ms queue before starting the device clock. This
+prevents paused/loading peers from starting playback ahead of their PCM.
+A genuine later starvation is counted and re-primes the output; it is never
+excluded from the zero-underrun tests. Normal unlinked Qt audio retains its
+pull path. Private GUI audio tests also require zero dropped core PCM,
+including a 192 kHz two-player topology round trip.
+
+`kartPosition0` through `kartPosition7` in the video CSV hash each racer's
+whole-pixel position. The course sweep uses these observations to require
+actual movement rather than treating small stationary subpixel changes as
+active gameplay. Battle fixtures use explicit steering and item inputs,
+because arenas have no route checkpoints for the race autodriver.

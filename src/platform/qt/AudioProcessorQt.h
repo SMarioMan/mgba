@@ -8,6 +8,10 @@
 #include "AudioProcessor.h"
 #include <atomic>
 #include <QThread>
+#include <QTimer>
+#include <QByteArray>
+#include <QIODevice>
+#include <QElapsedTimer>
 
 #if (QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
 #include <QAudioOutput>
@@ -49,8 +53,19 @@ public slots:
 private:
     bool dispatchToWorker() const { return m_worker && QThread::currentThread() != m_worker->thread(); }
     void stopOutput();
+    void pumpAudio();
+    bool primeOutput();
     std::unique_ptr<QThread> m_audioThread;
     QObject* m_worker = nullptr;
+    std::unique_ptr<QTimer> m_audioPump;
+    QIODevice* m_pushDevice = nullptr;
+    QByteArray m_pendingPCM;
+    QElapsedTimer m_pumpClock;
+    qint64 m_previousPump = 0;
+    bool m_tracePump = false;
+    bool m_waitingForPCM = false;
+    bool m_sinkHasPlayed = false;
+    bool m_recoverQueued = false;
 #if (QT_VERSION >= QT_VERSION_CHECK(6, 0, 0))
 	std::unique_ptr<QAudioSink> m_audioOutput;
 #else
