@@ -415,6 +415,8 @@ private slots:
 #ifdef BUILD_SDL
         struct AudioOutput {
             mSDLAudio device{};
+            uint64_t initialOutputSamples = 0;
+            uint64_t initialUnderrunSamples = 0;
             bool active = false;
             ~AudioOutput() { if (active) mSDLDeinitAudio(&device); }
         } audio[8];
@@ -477,9 +479,10 @@ private slots:
                         mCoreSyncUnlockAudio(&thread->impl->sync);
 #ifdef BUILD_SDL
                         if (sdlAudioCheck) {
-                            mSDLPauseAudio(&audio[i].device);
-                            audio[i].device.outputSamples = audio[i].device.underrunSamples = 0;
-                            mSDLResumeAudio(&audio[i].device);
+                            // Observe counters under the callback lock. Cycling
+                            // eight device clocks here creates its own stall.
+                            mSDLGetAudioStats(&audio[i].device, &audio[i].initialOutputSamples,
+                                             &audio[i].initialUnderrunSamples);
                         }
 #endif
 #ifdef BUILD_QT_MULTIMEDIA
@@ -588,12 +591,12 @@ private slots:
             for (int i = 0; i < players; ++i) {
                 mSDLPauseAudio(&audio[i].device);
                 qInfo("GUI SDL P%d: %llu output samples, %llu underrun samples", i + 1,
-                      (unsigned long long) audio[i].device.outputSamples,
-                      (unsigned long long) audio[i].device.underrunSamples);
+                      (unsigned long long) (audio[i].device.outputSamples - audio[i].initialOutputSamples),
+                      (unsigned long long) (audio[i].device.underrunSamples - audio[i].initialUnderrunSamples));
             }
             for (int i = 0; i < players; ++i) {
-                QVERIFY(audio[i].device.outputSamples > 48000 * 30);
-                QCOMPARE(audio[i].device.underrunSamples, uint64_t(0));
+                QVERIFY(audio[i].device.outputSamples - audio[i].initialOutputSamples > 48000 * 30);
+                QCOMPARE(audio[i].device.underrunSamples - audio[i].initialUnderrunSamples, uint64_t(0));
             }
         }
 #endif

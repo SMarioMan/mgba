@@ -39,6 +39,7 @@ struct mSDLAudio {
 	struct mCoreSync* sync;
 	struct mCoreThread* thread;
 	bool ringBuffered;
+	bool underrunActive;
 	uint64_t outputSamples;
 	uint64_t underrunSamples;
 };
@@ -47,6 +48,7 @@ struct mCoreThread;
 bool mSDLInitAudio(struct mSDLAudio* context, struct mCoreThread*);
 void mSDLDeinitAudio(struct mSDLAudio* context);
 void mSDLPauseAudio(struct mSDLAudio* context);
+void mSDLGetAudioStats(struct mSDLAudio* context, uint64_t* outputSamples, uint64_t* underrunSamples);
 void mSDLResumeAudio(struct mSDLAudio* context);
 
 CXX_GUARD_END
