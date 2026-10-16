@@ -195,3 +195,13 @@ The CSV reader advances one input cursor per console while preserving sorted
 row order and held-key semantics. Long recordings therefore cost only the new
 rows at each frame boundary rather than rescanning the full recording at every
 CPU scheduling quantum.
+
+`--autodrive-mask MASK` restricts the route-following keypad controller to
+selected physical windows (bit 0 is the first window); the default is all
+windows. This supports testing a lone finisher while other human racers remain
+stationary. It does not change race RAM, software player IDs, or CPU flags.
+
+`--until-watch-mask MASK` selects bits of the read-only `--watch` word for
+`--until-watch-value` comparisons, including automatic results confirmation.
+Its default is `0xFFFFFFFF`. This allows a scene snapshot at a byte-sized game
+event without writing game memory or guessing a video-frame number.

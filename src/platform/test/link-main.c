@@ -314,8 +314,8 @@ static struct {
     const struct Input* events;
     size_t count, next[GBA_RING_MAX_PLAYERS];
     struct Route routes[GBA_RING_MAX_PLAYERS];
-    unsigned driveFrom, firePeriod, fireSpread;
-    uint32_t barrierState, confirmScene, watch, watchValue;
+    unsigned driveFrom, driveMask, firePeriod, fireSpread;
+    uint32_t barrierState, confirmScene, watch, watchValue, watchMask;
     bool autofire, untilWatch, recording, recordingError;
     struct Input* recordedInputs;
     size_t recordedCount, recordedCapacity;
@@ -453,10 +453,11 @@ static void applyFrameInputs(void* context) {
         if (event->player == i) core->setKeys(core, event->keys);
     }
     if (frame >= playback.driveFrom) {
-        drivePlayer(core, i, &playback.routes[i], playback.autofire,
-                    playback.firePeriod, playback.fireSpread, playback.barrierState);
+        if (playback.driveMask & (1U << i))
+            drivePlayer(core, i, &playback.routes[i], playback.autofire,
+                        playback.firePeriod, playback.fireSpread, playback.barrierState);
         if (playback.confirmScene && core->busRead32(core, 0x03002E20) == playback.confirmScene &&
-            !(playback.untilWatch && core->busRead32(core, playback.watch) == playback.watchValue))
+            !(playback.untilWatch && (core->busRead32(core, playback.watch) & playback.watchMask) == playback.watchValue))
             core->setKeys(core, frame % 60 < 15 ? 1 : 0);
     }
     if (playback.recording && !playback.recordingError) {
@@ -490,14 +491,14 @@ int main(int argc, char** argv) {
 	const char* progressPath = NULL;
 	unsigned players = 0, frames = 600;
 	unsigned expectHost = 0, breakFrame = UINT_MAX, restoreFrame = UINT_MAX;
-	uint32_t watch = 0, untilWatchValue = 0;
+	uint32_t watch = 0, untilWatchValue = 0, untilWatchMask = UINT32_MAX;
     bool untilWatch = false;
 	uint32_t traceAddress = 0;
 	unsigned tracePlayer = 0;
 	unsigned traceStopFrame = UINT_MAX, profileUntil = UINT_MAX, profileFrom = UINT_MAX;
 	uint32_t dumpAddress = 0, keysAddress = 0x03004F30;
 	uint32_t barrierState = 0, untilScene = 0, autoConfirmScene = 0;
-    unsigned settleFrames = 0, firePeriod = 120, fireSpread = 0;
+    unsigned settleFrames = 0, firePeriod = 120, fireSpread = 0, autodriveMask = 255;
 	unsigned dumpWords = 32;
 	unsigned keySlots = 4, autodriveFrame = UINT_MAX, debugStepFrame = UINT_MAX;
 	const char* recordInputPath = NULL;
@@ -547,8 +548,10 @@ int main(int argc, char** argv) {
         else if (!strcmp(option, "--autofire-spread") && number(value, &n) && n <= 600) fireSpread = n;
         else if (!strcmp(option, "--record-inputs")) recordInputPath = value;
         else if (!strcmp(option, "--autodrive-frame") && number(value, &n) && n < UINT_MAX) autodriveFrame = n;
+        else if (!strcmp(option, "--autodrive-mask") && number(value, &n) && n <= 255) autodriveMask = n;
 		else if (!strcmp(option, "--frames") && number(value, &n) && n <= 100000) frames = n;
 		else if (!strcmp(option, "--until-watch-value") && number(value, &n) && n <= UINT32_MAX) { untilWatchValue = n; untilWatch = true; }
+        else if (!strcmp(option, "--until-watch-mask") && number(value, &n) && n <= UINT32_MAX) untilWatchMask = n;
 		else if (!strcmp(option, "--watch") && number(value, &n) && n <= UINT32_MAX) watch = n;
 		else if (!strcmp(option, "--expect-host") && number(value, &n) && n < 8) expectHost = n;
 		else if (!strcmp(option, "--break-frame") && number(value, &n) && n < UINT_MAX) breakFrame = n;
@@ -582,12 +585,14 @@ int main(int argc, char** argv) {
     playback.events = inputs;
     playback.count = nInputs;
     playback.driveFrom = autodriveFrame;
+    playback.driveMask = autodriveMask;
     playback.firePeriod = firePeriod;
     playback.fireSpread = fireSpread;
     playback.barrierState = barrierState;
     playback.confirmScene = autoConfirmScene;
     playback.watch = watch;
     playback.watchValue = untilWatchValue;
+    playback.watchMask = untilWatchMask;
     playback.untilWatch = untilWatch;
     playback.autofire = autofire;
     playback.recording = recordInputPath != NULL;
@@ -743,7 +748,7 @@ int main(int argc, char** argv) {
             allSceneMatch = true;
             for (unsigned i = 0; i < players; ++i)
                 if (p[i].core->busRead32(p[i].core, 0x03002E20) != untilScene ||
-                    (untilWatch && p[i].core->busRead32(p[i].core, watch) != untilWatchValue)) allSceneMatch = false;
+                    (untilWatch && (p[i].core->busRead32(p[i].core, watch) & untilWatchMask) != untilWatchValue)) allSceneMatch = false;
             if (!allSceneMatch) sceneMatchedFrame = UINT_MAX;
             else if (sceneMatchedFrame == UINT_MAX) sceneMatchedFrame = minFrame;
             /* Scene pointers can change before their initialization runs.
