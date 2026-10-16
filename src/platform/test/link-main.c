@@ -319,7 +319,7 @@ static struct {
     size_t count, next[GBA_RING_MAX_PLAYERS];
     struct Route routes[GBA_RING_MAX_PLAYERS];
     unsigned driveFrom, driveMask, firePeriod, fireSpread;
-    uint32_t barrierState, confirmScene, watch, watchValue, watchMask;
+    uint32_t barrierState, confirmScene, releaseScene, watch, watchValue, watchMask;
     bool autofire, untilWatch, recording, recordingError;
     struct Input* recordedInputs;
     size_t recordedCount, recordedCapacity;
@@ -464,6 +464,9 @@ static void applyFrameInputs(void* context) {
             !(playback.untilWatch && (core->busRead32(core, playback.watch) & playback.watchMask) == playback.watchValue))
             core->setKeys(core, frame % 60 < 15 ? 1 : 0);
     }
+    /* Release only the keypad: results remain free to animate naturally. */
+    if (playback.releaseScene && core->busRead32(core, 0x03002E20) == playback.releaseScene)
+        core->setKeys(core, 0);
     if (playback.recording && !playback.recordingError) {
         unsigned keys = core->getKeys(core);
         if (playback.recordedKeys[i] == keys) return;
@@ -501,7 +504,7 @@ int main(int argc, char** argv) {
 	unsigned tracePlayer = 0;
 	unsigned traceStopFrame = UINT_MAX, profileUntil = UINT_MAX, profileFrom = UINT_MAX;
 	uint32_t dumpAddress = 0, keysAddress = 0x03004F30;
-	uint32_t barrierState = 0, untilScene = 0, autoConfirmScene = 0;
+	uint32_t barrierState = 0, untilScene = 0, autoConfirmScene = 0, releaseScene = 0;
     unsigned settleFrames = 0, firePeriod = 120, fireSpread = 0, autodriveMask = 255;
 	unsigned dumpWords = 32;
 	unsigned keySlots = 4, autodriveFrame = UINT_MAX, debugStepFrame = UINT_MAX;
@@ -536,6 +539,7 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--trace-file")) tracePath = value;
 		else if (!strcmp(option, "--trace-player") && number(value, &n) && n < 8) tracePlayer = n;
 		else if (!strcmp(option, "--trace-stop-frame") && number(value, &n) && n <= 100000) traceStopFrame = n;
+		else if (!strcmp(option, "--release-inputs-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) releaseScene = n;
 		else if (!strcmp(option, "--until-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) untilScene = n;
         else if (!strcmp(option, "--settle-frames") && number(value, &n) && n <= 10000) settleFrames = n;
 		else if (!strcmp(option, "--auto-confirm-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) autoConfirmScene = n;
@@ -594,6 +598,7 @@ int main(int argc, char** argv) {
     playback.fireSpread = fireSpread;
     playback.barrierState = barrierState;
     playback.confirmScene = autoConfirmScene;
+    playback.releaseScene = releaseScene;
     playback.watch = watch;
     playback.watchValue = untilWatchValue;
     playback.watchMask = untilWatchMask;

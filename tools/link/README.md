@@ -117,6 +117,11 @@ and watch value unchanged before taking the barrier snapshot. Use this when a
 scene pointer changes before its native menu initialization publishes graphics.
 Automatic confirmation stops once the requested watch value is reached.
 
+`--release-inputs-scene ADDRESS` releases every console's keypad while it is
+in that scene, overriding CSV and autodrive keys without changing game memory.
+Use it with a long `--settle-frames` interval to check moving results backgrounds
+and sustained results music without the driver accidentally confirming a menu.
+
 `--autodrive-frame N` observes the native AMKE route and local driver's heading
 and sends keypad steering after frame N. Large heading errors use A+B with R
 for a quick turn. Every 120 frames the controller checks actual movement,
