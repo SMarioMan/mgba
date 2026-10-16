@@ -163,3 +163,15 @@ scheduling and must not be mixed into performance comparisons. The game-side
 `test_profile.py` compares complete eight-player snapshots and per-video timing
 records with observation enabled and disabled; both are identical. Normal
 GUI/CLI execution continues to use the original uninstrumented run loop.
+
+## Visible real-time regression review
+
+The MKSC checkout provides `tools/ring/review_gui.py`. Point `--gui-test` at this
+build's `qt/test-qt-ring_gui` (`.exe` on Windows), then supply `--rom`, `--bios`,
+`--mode vs|battle|gp`, `--players 2..8`, and optionally `--seconds 35..300`.
+It runs the real GUI regression with tiled windows, real-time pacing, audible
+Qt outputs, and temporary settings/saves. `--fixture` replays an existing keypad
+CSV; `--log` preserves its actual test output and exit status. See the MKSC
+`tools/ring/README.md` for complete commands and replay limitations. The normal
+CTest matrix is unchanged; the additional 2–8/GP rows are enabled for visual
+review only.

@@ -22,6 +22,7 @@
 #include <QTimer>
 #include <QTemporaryDir>
 #include <QPointer>
+#include <QScreen>
 #include <QTest>
 #include <atomic>
 #include <chrono>
@@ -306,6 +307,14 @@ private slots:
         QTest::addColumn<bool>("wireLoss");
 		for (int players : {2, 8}) for (const QString& mode : {QString("vs"), QString("battle")})
 			QTest::newRow(qPrintable(QString("%1-%2").arg(mode).arg(players))) << players << mode << true << false << false;
+        if (qEnvironmentVariableIntValue("MGBA_RING_GUI_VISUAL")) {
+            for (int players = 2; players <= 8; ++players) {
+                for (const QString& mode : {QString("vs"), QString("battle"), QString("gp")}) {
+                    if ((players == 2 || players == 8) && mode != "gp") continue;
+                    QTest::newRow(qPrintable(QString("%1-%2").arg(mode).arg(players))) << players << mode << true << false << false;
+                }
+            }
+        }
 		QTest::newRow("vs-8-loss-start") << 8 << QString("vs") << true << false << true;
         QTest::newRow("vs-2-late") << 2 << QString("vs") << true << true << false;
 		for (const QString& mode : {QString("vs"), QString("battle")})
@@ -350,8 +359,10 @@ private slots:
 		QCOMPARE(app->multiplayer()->ringTopology(), ringTopology);
 		QCOMPARE(app->multiplayer()->maxPlayers(), ringTopology ? 8 : 4);
 		if (!ringTopology && qEnvironmentVariableIsEmpty("MGBA_RING_GUI_STOCK_INPUTS")) QSKIP("Set MGBA_RING_GUI_STOCK_INPUTS to the stock input fixtures directory");
-		QFile fixture(ringTopology ? qEnvironmentVariable("MGBA_RING_GUI_INPUTS") + QString("/%1-%2.csv").arg(mode).arg(players)
-		                          : qEnvironmentVariable("MGBA_RING_GUI_STOCK_INPUTS") + QString("/stock-%1.csv").arg(mode));
+        QString fixturePath = qEnvironmentVariable("MGBA_RING_GUI_REPLAY");
+        if (fixturePath.isEmpty()) fixturePath = ringTopology ? qEnvironmentVariable("MGBA_RING_GUI_INPUTS") + QString("/%1-%2.csv").arg(mode).arg(players)
+                                                             : qEnvironmentVariable("MGBA_RING_GUI_STOCK_INPUTS") + QString("/stock-%1.csv").arg(mode);
+		QFile fixture(fixturePath);
 		QVERIFY(fixture.open(QIODevice::ReadOnly));
 		for (Inputs& input : inputs) input = {};
 		for (const QByteArray& row : fixture.readAll().split('\n')) {
@@ -374,6 +385,15 @@ private slots:
 			CoreController* controller = manager.loadGame(rom);
 			QVERIFY(controller);
 			inputs[i].controller = controller;
+            if (qEnvironmentVariableIntValue("MGBA_RING_GUI_VISUAL")) {
+                unsigned lastEventFrame = 0;
+                for (const Inputs& input : inputs) {
+                    if (!input.events.isEmpty()) lastEventFrame = std::max(lastEventFrame, input.events.last().first);
+                }
+                // A transition fixture may leave its first race much later.
+                // Measure the final scene only after replaying the full CSV.
+                inputs[i].minSpeedFrame = lastEventFrame + 180;
+            }
             inputs[i].breakWire = wireLoss && !i;
             inputs[i].finishScene = finishScene;
             inputs[i].measureSpeed = ringTopology && !wireLoss;
@@ -406,6 +426,19 @@ private slots:
 			}
 		}
 		QCOMPARE(app->multiplayer()->attached(), players);
+        if (qEnvironmentVariableIntValue("MGBA_RING_GUI_VISUAL")) {
+            QScreen* screen = QGuiApplication::primaryScreen();
+            QVERIFY(screen);
+            QRect area = screen->availableGeometry();
+            int columns = players <= 2 ? players : players <= 6 ? 3 : 4;
+            int rows = (players + columns - 1) / columns;
+            for (int i = 0; i < players; ++i) {
+                windows[i]->resize(area.width() / columns - 12, area.height() / rows - 36);
+                windows[i]->move(area.left() + (i % columns) * area.width() / columns,
+                                 area.top() + (i / columns) * area.height() / rows);
+                QVERIFY(windows[i]->isVisible());
+            }
+        }
 		if (ringTopology && players == 2) {
 			QVERIFY(app->multiplayer()->setRingTopology(false));
 			QVERIFY(app->multiplayer()->setRingTopology(true));
@@ -461,7 +494,7 @@ private slots:
 		QElapsedTimer timer;
 		timer.start();
 		qint64 nextProgress = 30000;
-		while (!entered && timer.elapsed() < 600000) {
+		while (!entered && timer.elapsed() < (qEnvironmentVariableIntValue("MGBA_RING_GUI_VISUAL") ? 1800000 : 600000)) {
 			QTest::qWait(audioCheck ? 250 : 20);
             if (audioCheck) {
                 bool allRacing = true, allComplete = true;
@@ -549,7 +582,7 @@ private slots:
                 }
 				if (core->frameCounter(core) < 4901 || (ringTopology && !wireLoss && !inputs[i].speedComplete) || core->rawRead8(core, 0x0300361B, -1) != unsigned(players)) { entered = false; continue; }
 				QCOMPARE(core->rawRead8(core, 0x0300361C, -1), unsigned(i));
-				QVERIFY(core->rawRead16(core, 0x0300361E, -1) & (mode == "vs" ? 0x400 : 0x800));
+				QVERIFY(core->rawRead16(core, 0x0300361E, -1) & (mode == "vs" ? 0x400 : mode == "gp" ? 0x100 : 0x800));
 				// The stock opponent-marker switch used to produce a null cell
 				// for a fourth visible opponent and flood OAM with invalid shapes.
 				GBA* gba = static_cast<GBA*>(core->board);
@@ -649,7 +682,8 @@ public:
 int main(int argc, char** argv) {
 	// Eight native cores can exceed QtTest's five-minute default on shared
 	// cloud CPUs; keep its watchdog beyond the explicit gameplay deadline.
-	if (qEnvironmentVariableIsEmpty("QTEST_FUNCTION_TIMEOUT")) qputenv("QTEST_FUNCTION_TIMEOUT", "660000");
+	if (qEnvironmentVariableIsEmpty("QTEST_FUNCTION_TIMEOUT"))
+        qputenv("QTEST_FUNCTION_TIMEOUT", qEnvironmentVariableIntValue("MGBA_RING_GUI_VISUAL") ? "1860000" : "660000");
 	QTemporaryDir configDirectory;
 	if (!configDirectory.isValid()) return 1;
 	// Linux/macOS config discovery honors XDG_CONFIG_HOME. Keep concurrent
