@@ -103,8 +103,17 @@ static void captureFrame(void* context) {
             if ((obj[0] & 0x2000) && tile >= 0x3C0 && tile < 0x3E0) menuCursors |= 16;
             if (tile >= 0x2C0 && tile < 0x300) menuCursors |= 1U << ((tile - 0x2C0) / 16);
             if (tile >= 512) ++slots[(tile - 512) / 64];
-            if (tile == 0x132 && (obj[2] >> 12) >= 8) ++markers;
-            if (tile == 0x09C && (obj[2] >> 12) >= 8) {
+            unsigned shape = obj[0] >> 14;
+            bool identity8 = (obj[0] & 0x2000) && (obj[2] >> 12) < 8;
+            if ((tile == 0x132 && !identity8 && (obj[2] >> 12) >= 8) || (identity8 && shape == 1)) ++markers;
+            if (identity8 && shape == 2 && (obj[2] & 0xC00) == 0x400) {
+                unsigned color = ((obj[2] >> 12) + 1) * 16;
+                for (unsigned pixel = 0; pixel < 128; ++pixel) {
+                    unsigned index = ((uint8_t*)gba->video.vram)[0x10000 + tile * 32 + pixel];
+                    if (index && index != color && index != 144 && index != 160) ++balloonForeignPixels;
+                }
+            }
+            if (tile == 0x09C && !(obj[0] & 0x2000) && (obj[2] >> 12) >= 8) {
                 for (unsigned pixel = 0; pixel < 256; ++pixel) {
                     unsigned index = (((uint8_t*)gba->video.vram)[0x10000 + tile * 32 + pixel / 2] >> ((pixel & 1) * 4)) & 15;
                     if (index > 2) ++balloonForeignPixels;
@@ -164,7 +173,7 @@ static void captureFrame(void* context) {
                 roadProjectionHash = (roadProjectionHash ^ player->core->rawRead32(player->core,
                     0x03004FE0 + displayBank * 0x600 + offset, -1)) * 16777619U;
         } else roadProjectionHash = 0;
-        fprintf(videoLog, ",%u,%u,%u", displayBank, writeBank, roadProjectionHash);
+        fprintf(videoLog, ",%u,%u,%u,%u", displayBank, writeBank, roadProjectionHash, player->core->rawRead16(player->core, 0x05000000, -1));
         for (unsigned i = 0; i < 8; ++i) fprintf(videoLog, ",%u", kartPositions[i]);
         if (soundTable) {
             uint32_t camera = player->core->rawRead32(player->core, 0x03003658, -1);
@@ -624,7 +633,7 @@ int main(int argc, char** argv) {
 	if (videoPath) {
 		videoLog = fopen(videoPath, "w");
 		if (!videoLog) { perror(videoPath); goto done; }
-        fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus,menuCursors,starMask,shrinkMask,booMask,roadDisplayBuffer,roadWriteBuffer,roadProjectionHash");
+        fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus,menuCursors,starMask,shrinkMask,booMask,roadDisplayBuffer,roadWriteBuffer,roadProjectionHash,backdropColor");
         for (unsigned i = 0; i < 8; ++i) fprintf(videoLog, ",kartPosition%u", i);
         if (soundTable) fprintf(videoLog, ",localPlayer,cameraPlayer,fifoSource,pcmBufferEnd,pcmCounter,soundIdent,engineHeader,voiceHeader,effectHeader");
         if (timingState) fprintf(videoLog, ",exchangeCycles,renderCycles,profileFrame,publishCycles,mixCycles");
@@ -965,23 +974,36 @@ int main(int argc, char** argv) {
             for (unsigned object = 0; object < 128; ++object) {
                 uint16_t* obj = gba->video.oam.raw + object * 4;
                 if ((obj[0] & 0x300) == 0x200) continue;
-                if ((obj[2] & 1023) == 0x09C && (obj[2] >> 12) >= 8)
-                    ++balloons[(obj[2] >> 12) - 8];
+                if (((obj[2] & 1023) == 0x09C && !(obj[0] & 0x2000) && (obj[2] >> 12) >= 8) ||
+                    ((obj[0] & 0x2000) && (obj[0] >> 14) == 2 && (obj[2] & 0xC00) == 0x400 && (obj[2] >> 12) < 8))
+                    ++balloons[(obj[2] >> 12) - ((obj[0] & 0x2000) ? 0 : 8)];
             }
             printf("],\"balloonSprites\":[");
             for (unsigned j = 0; j < 8; ++j) printf("%s%u", j ? "," : "", balloons[j]);
             printf("],\"identityPalette\":[");
             for (unsigned j = 0; j < 8; ++j)
-                printf("%s[%u,%u]", j ? "," : "", core->rawRead16(core, 0x05000302 + j * 32, -1), core->rawRead16(core, 0x05000304 + j * 32, -1));
+                printf("%s[%u,%u]", j ? "," : "", core->rawRead16(core, 0x05000220 + j * 32, -1), core->rawRead16(core, 0x05000320, -1));
             uint32_t trackDef = core->rawRead32(core, 0x030033B8, -1);
             unsigned minimapShift = (core->rawRead8(core, 0x03003621, -1) & 32) || core->rawRead8(core, trackDef + 0xCA, -1) ? 20 : 21;
             printf("],\"minimapShift\":%u,\"minimapDots\":[", minimapShift);
             bool firstDot = true;
             for (unsigned j = 0; j < 128; ++j) {
                 uint16_t* obj = gba->video.oam.raw + j * 4;
-                if ((obj[0] & 0x300) == 0x200 || (obj[2] & 1023) != 0x133 || (obj[2] >> 12) < 8) continue;
-                printf("%s[%u,%u,%u]", firstDot ? "" : ",", (obj[2] >> 12) - 8, obj[1] & 511, obj[0] & 255);
+                bool identityDot = (obj[0] & 0x2000) && (obj[0] >> 14) == 0 && (obj[1] >> 14) == 0 && (obj[2] >> 12) < 8;
+                bool legacyDot = !(obj[0] & 0x2000) && (obj[2] & 1023) == 0x133 && (obj[2] >> 12) >= 8;
+                if ((obj[0] & 0x300) == 0x200 || (!identityDot && !legacyDot)) continue;
+                printf("%s[%u,%u,%u]", firstDot ? "" : ",", (obj[2] >> 12) - (identityDot ? 0 : 8), obj[1] & 511, obj[0] & 255);
                 firstDot = false;
+            }
+            printf("],\"kartPalettesMatch\":[");
+            for (unsigned j = 0; j < 8; ++j) {
+                bool matches = true;
+                /* Matching AMKE's OBJ palette buffer; ignore the transparent
+                 * zero entry, now shared by the 8-bpp indicator sprites. */
+                for (unsigned entry = 1; entry < 16; ++entry)
+                    if (core->rawRead16(core, 0x030004D8 + (8 + j) * 32 + entry * 2, -1) !=
+                        core->rawRead16(core, 0x05000200 + (8 + j) * 32 + entry * 2, -1)) matches = false;
+                printf("%s%s", j ? "," : "", matches ? "true" : "false");
             }
             printf("]}}");
 			uint32_t menu = core->busRead32(core, 0x0203EBE8);
