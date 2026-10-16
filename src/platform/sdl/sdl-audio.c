@@ -21,6 +21,7 @@ static void _mSDLAudioCallback(void* context, Uint8* data, int len);
 
 bool mSDLInitAudio(struct mSDLAudio* context, struct mCoreThread* threadContext) {
 	context->ringBuffered = false;
+	context->underrunActive = false;
 #if defined(M_CORE_GBA) && !defined(DISABLE_THREADING)
 	context->ringBuffered = GBASIORingThreadIsAttached(threadContext);
 #endif
@@ -128,6 +129,27 @@ void mSDLPauseAudio(struct mSDLAudio* context) {
 #else
 	UNUSED(context);
 	SDL_PauseAudio(1);
+#endif
+}
+
+/* Snapshot without stopping the device clock. Pause/resume can re-prime an
+ * audio backend and disturb the other participants in a linked session. */
+void mSDLGetAudioStats(struct mSDLAudio* context, uint64_t* outputSamples, uint64_t* underrunSamples) {
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+    SDL_LockAudioStream(context->stream);
+#elif SDL_VERSION_ATLEAST(2, 0, 0)
+    SDL_LockAudioDevice(context->deviceId);
+#else
+    SDL_LockAudio();
+#endif
+    *outputSamples = context->outputSamples;
+    *underrunSamples = context->underrunSamples;
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+    SDL_UnlockAudioStream(context->stream);
+#elif SDL_VERSION_ATLEAST(2, 0, 0)
+    SDL_UnlockAudioDevice(context->deviceId);
+#else
+    SDL_UnlockAudio();
 #endif
 }
 
@@ -241,8 +263,11 @@ static void _mSDLAudioCallback(void* context, Uint8* data, int len) {
 
 	audioContext->outputSamples += len;
 	if (available < len) {
+        if (buffered && !audioContext->underrunActive)
+            mLOG(SDL_AUDIO, DEBUG, "Ring audio underrun: %d missing after %" PRIu64 " output frames", len - available, audioContext->outputSamples);
+        audioContext->underrunActive = true;
 		audioContext->underrunSamples += len - available;
 		memset(((short*) data) + audioContext->obtainedSpec.channels * available, 0, (len - available) * audioContext->obtainedSpec.channels * sizeof(short));
-	}
+	} else audioContext->underrunActive = false;
 #endif
 }
