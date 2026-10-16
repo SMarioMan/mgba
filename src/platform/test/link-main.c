@@ -174,6 +174,10 @@ static void captureFrame(void* context) {
                     0x03004FE0 + displayBank * 0x600 + offset, -1)) * 16777619U;
         } else roadProjectionHash = 0;
         fprintf(videoLog, ",%u,%u,%u,%u", displayBank, writeBank, roadProjectionHash, player->core->rawRead16(player->core, 0x05000000, -1));
+        uint32_t cursorPaletteHash = 2166136261U;
+        for (unsigned color = 1; color <= 14; ++color)
+            cursorPaletteHash = (cursorPaletteHash ^ player->core->rawRead16(player->core, 0x05000200 + color * 32, -1)) * 16777619U;
+        fprintf(videoLog, ",%u", cursorPaletteHash);
         for (unsigned i = 0; i < 8; ++i) fprintf(videoLog, ",%u", kartPositions[i]);
         if (soundTable) {
             uint32_t camera = player->core->rawRead32(player->core, 0x03003658, -1);
@@ -633,7 +637,7 @@ int main(int argc, char** argv) {
 	if (videoPath) {
 		videoLog = fopen(videoPath, "w");
 		if (!videoLog) { perror(videoPath); goto done; }
-        fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus,menuCursors,starMask,shrinkMask,booMask,roadDisplayBuffer,roadWriteBuffer,roadProjectionHash,backdropColor");
+        fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus,menuCursors,starMask,shrinkMask,booMask,roadDisplayBuffer,roadWriteBuffer,roadProjectionHash,backdropColor,cursorPaletteHash");
         for (unsigned i = 0; i < 8; ++i) fprintf(videoLog, ",kartPosition%u", i);
         if (soundTable) fprintf(videoLog, ",localPlayer,cameraPlayer,fifoSource,pcmBufferEnd,pcmCounter,soundIdent,engineHeader,voiceHeader,effectHeader");
         if (timingState) fprintf(videoLog, ",exchangeCycles,renderCycles,profileFrame,publishCycles,mixCycles");
