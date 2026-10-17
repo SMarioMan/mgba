@@ -1,0 +1,13 @@
+#!/bin/sh
+# Keep the requested co-author in a distinct Git trailer block, including -m commits.
+set -eu
+message=$1
+temporary=$(mktemp "${message}.trailers.XXXXXX")
+trap 'rm -f "$temporary"' EXIT HUP INT TERM
+awk 'tolower($0) !~ /^co-authored-by:.*<codex@users\.noreply\.github\.com>[[:space:]]*$/ { print }' "$message" > "$temporary"
+# Do not turn an empty/editor-aborted message into a co-author-only commit.
+if [ -n "$(git stripspace --strip-comments < "$temporary")" ]; then
+    git interpret-trailers --in-place --if-exists=replace --if-missing=add \
+        --trailer 'Co-Authored-By: GPT-6.1 Sol (Medium) <codex@users.noreply.github.com>' "$temporary"
+fi
+cat "$temporary" > "$message"
