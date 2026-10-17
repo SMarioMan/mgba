@@ -9,8 +9,11 @@
 #include "platform/qt/CoreManager.h"
 #include "platform/qt/GBAApp.h"
 #include "platform/qt/Window.h"
+#include "platform/qt/DisplayGL.h"
 #include <mgba/internal/gba/gba.h>
 #include <mgba/internal/gba/sio/ring.h>
+#include <mgba/feature/thread-proxy.h>
+#include <mgba-util/vfs.h>
 #include <QAction>
 #include <QComboBox>
 #include <QFile>
@@ -120,6 +123,64 @@ class RingGuiTest : public QObject {
 Q_OBJECT
     Inputs inputs[8];
 private slots:
+    void threadedVideoFailedConsumer() {
+#if defined(DISABLE_THREADING) || defined(MINIMAL_CORE)
+        QSKIP("Threaded GBA rendering is disabled in this build");
+#else
+        mVideoThreadProxy proxy{};
+        mVideoThreadProxyCreate(&proxy);
+        proxy.d.paletteSize = proxy.d.vramSize = proxy.d.oamSize = 16;
+        proxy.d.parsePacket = [](mVideoLogger*, const mVideoLoggerDirtyInfo*) { return false; };
+        mVideoLoggerRendererInit(&proxy.d);
+        mVideoLoggerDirtyInfo packet{};
+        QVERIFY(proxy.d.writeData(&proxy.d, &packet, sizeof(packet)));
+        bool stopped = false;
+        for (int i = 0; i < 1000 && !stopped; ++i) {
+            MutexLock(&proxy.mutex);
+            stopped = proxy.threadState == PROXY_THREAD_STOPPED;
+            ConditionWake(&proxy.toThreadCond);
+            MutexUnlock(&proxy.mutex);
+            if (!stopped) QTest::qWait(1);
+        }
+        // A failed worker must also be joined before freeing its queue.
+        mVideoLoggerRendererDeinit(&proxy.d);
+        QVERIFY(stopped);
+        QCOMPARE(proxy.dirtyQueue.data, nullptr);
+#endif
+    }
+    void threadedVideoReset() {
+#if defined(DISABLE_THREADING) || defined(MINIMAL_CORE)
+        QSKIP("Threaded GBA rendering is disabled in this build");
+#else
+        QByteArray rom = qEnvironmentVariable("MGBA_RING_GUI_BOOT_ROM").toUtf8();
+        QByteArray bios = qEnvironmentVariable("MGBA_RING_GUI_BIOS").toUtf8();
+        if (rom.isEmpty() || bios.isEmpty()) QSKIP("Set MGBA_RING_GUI_BOOT_ROM and MGBA_RING_GUI_BIOS");
+        std::vector<mColor> pixels(240 * 160);
+        auto destroy = [](mCore* core) { mCoreConfigDeinit(&core->config); core->deinit(core); };
+        std::unique_ptr<mCore, decltype(destroy)> core(mCoreCreate(mPLATFORM_GBA), destroy);
+        QVERIFY(core && core->init(core.get()));
+        mCoreInitConfig(core.get(), "threaded-video-reset-test");
+        mCoreConfigSetOverrideIntValue(&core->config, "threadedVideo", 1);
+        mCoreConfigSetOverrideIntValue(&core->config, "useBios", 1);
+        mCoreConfigSetOverrideIntValue(&core->config, "skipBios", 0);
+        mCoreLoadConfig(core.get());
+        core->setVideoBuffer(core.get(), pixels.data(), 240);
+        VFile* vf = VFileOpen(bios.constData(), O_RDONLY);
+        QVERIFY(vf);
+        QVERIFY(core->loadBIOS(core.get(), vf, 0));
+        QVERIFY(mCoreLoadFile(core.get(), rom.constData()));
+        // Recreating an active proxy used to overwrite its consumer state
+        // before stopping the rendering worker. Exercise both entry points.
+        for (int reset = 0; reset < 4; ++reset) {
+            core->reset(core.get());
+            for (int frame = 0; frame < 30; ++frame) core->runFrame(core.get());
+            core->reloadConfigOption(core.get(), "hwaccelVideo", nullptr);
+            for (int frame = 0; frame < 30; ++frame) core->runFrame(core.get());
+            QCOMPARE(core->frameCounter(core.get()), uint32_t(60));
+            QVERIFY(static_cast<GBA*>(core->board)->biosVf);
+        }
+#endif
+    }
     void writableArguments() {
         // Include power-of-two argc values: the old Windows vector then had
         // no spare allocation for the mandatory terminating pointer.
@@ -217,15 +278,45 @@ private slots:
         if (rom.isEmpty()) QSKIP("Set MGBA_RING_GUI_BOOT_ROM to a --boot-ring ROM");
         QByteArray directory = settings.path().toUtf8(), romArg = rom.toUtf8();
         char arg0[] = "mgba-qt", flag[] = "--ring-players", count[] = "8";
-        char profile[] = "--instance-settings", hidden[] = "--hide-menu", biosFlag[] = "-b";
+        char profile[] = "--instance-settings", hidden[] = "--hide-menu", biosFlag[] = "--bios";
         QByteArray bios = qEnvironmentVariable("MGBA_RING_GUI_BIOS").toUtf8();
         config->setOption("gba.bios", "");
-        char* argv[] = {arg0, flag, count, profile, directory.data(), hidden, biosFlag, bios.data(), romArg.data()};
+        char* argv[] = {arg0, flag, count, profile, directory.data(), hidden, biosFlag, bios.data(), romArg.data(), nullptr};
         QVERIFY(config->parseArguments(9, argv));
         QVERIFY(app->multiplayer()->setRingTopology(true));
         QVERIFY(app->newWindow());
         app->initMultiplayer();
         QCOMPARE(app->windows().size(), 8);
+        // A short startup replay isolates backend initialization from ROM menu
+        // input. The ordinary full gameplay/settings regression stays intact.
+        int startupFrames = qEnvironmentVariableIntValue("MGBA_RING_GUI_STARTUP_FRAMES");
+        if (startupFrames) {
+            QVERIFY(startupFrames >= 60 && startupFrames <= 5100);
+            for (Window* window : app->windows()) {
+                auto controller = window->controller();
+                QVERIFY(controller);
+                if (qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE"))
+                    QVERIFY2(controller->supportsFeature(CoreController::Feature::OPENGL), "Hardware GBA renderer is disabled in this build");
+                QTRY_VERIFY_WITH_TIMEOUT(controller->hasStarted(), 10000);
+                QTRY_VERIFY_WITH_TIMEOUT(controller->frameCounter() >= uint64_t(startupFrames), 120000);
+                if (qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE"))
+                    QTRY_VERIFY_WITH_TIMEOUT(controller->hardwareAccelerated(), 10000);
+                QVERIFY(!mCoreThreadHasCrashed(controller->thread()));
+                CoreController::Interrupter interrupter(controller.get());
+                auto gba = static_cast<GBA*>(controller->thread()->core->board);
+                QVERIFY(gba->biosVf);
+                if (qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE")) {
+                    QVERIFY(controller->hardwareAccelerated());
+                    // OPENGL_MAGIC from the actual GBA renderer, rather than
+                    // merely checking that the build supports acceleration.
+                    QCOMPARE(gba->video.renderer->rendererId(gba->video.renderer), uint32_t(0x6E726C67));
+                }
+            }
+            for (Window* window : app->windows()) window->close();
+            QTRY_COMPARE_WITH_TIMEOUT(app->windows().size(), 0, 10000);
+            QTRY_COMPARE_WITH_TIMEOUT(app->multiplayer()->attached(), 0, 10000);
+            return;
+        }
         QFile fixture(qEnvironmentVariable("MGBA_RING_GUI_INPUTS") + "/vs-8.csv");
         QVERIFY(fixture.open(QIODevice::ReadOnly));
         for (Inputs& input : inputs) input = {};
@@ -243,6 +334,10 @@ private slots:
             QVERIFY(controller);
             QCOMPARE(window->config()->getOption("bios"), QString::fromUtf8(bios));
             QTRY_VERIFY_WITH_TIMEOUT(controller->hasStarted(), 10000);
+#if defined(BUILD_GL) || defined(BUILD_GLES2) || defined(BUILD_GLES3) || defined(USE_EPOXY)
+            if (qEnvironmentVariableIntValue("MGBA_RING_GUI_DISPLAY") == 1)
+                QVERIFY2(window->findChild<DisplayGL*>(), "Requested OpenGL display was not created");
+#endif
             QVERIFY(window->windowTitle().endsWith(QString(" - P%1").arg(i+1)));
             QVERIFY(!window->menuBar()->isVisible());
             inputs[i].controller = controller.get();
@@ -708,8 +803,9 @@ int main(int argc, char** argv) {
 	// test processes and their saved topology/MRU/output paths independent.
 	qputenv("XDG_CONFIG_HOME", configDirectory.path().toUtf8());
 	ConfigController config;
-	config.setQtOption("displayDriver", 0);
+	config.setQtOption("displayDriver", qEnvironmentVariableIsSet("MGBA_RING_GUI_DISPLAY") ? qEnvironmentVariableIntValue("MGBA_RING_GUI_DISPLAY") : 0);
     if (qEnvironmentVariableIsSet("MGBA_RING_GUI_THREADED")) config.setOption("threadedVideo", qEnvironmentVariableIntValue("MGBA_RING_GUI_THREADED"));
+    if (qEnvironmentVariableIsSet("MGBA_RING_GUI_HARDWARE")) config.setOption("hwaccelVideo", qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE"));
     bool qtAudio = qEnvironmentVariable("MGBA_RING_GUI_AUDIO") == "qt";
     bool audioCheck = qtAudio || qEnvironmentVariableIntValue("MGBA_RING_GUI_AUDIO");
     if (qtAudio) config.setQtOption("audioDriver", 0);

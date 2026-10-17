@@ -50,6 +50,7 @@ void mVideoThreadProxyInit(struct mVideoLogger* logger) {
 	RingFIFOInit(&proxyRenderer->dirtyQueue, 0x40000);
 
 	proxyRenderer->threadState = PROXY_THREAD_IDLE;
+	proxyRenderer->event = 0;
 	ThreadCreate(&proxyRenderer->thread, _proxyThread, proxyRenderer);
 }
 
@@ -66,21 +67,17 @@ void mVideoThreadProxyReset(struct mVideoLogger* logger) {
 
 void mVideoThreadProxyDeinit(struct mVideoLogger* logger) {
 	struct mVideoThreadProxy* proxyRenderer = (struct mVideoThreadProxy*) logger;
-	bool waiting = false;
 	MutexLock(&proxyRenderer->mutex);
 	while (proxyRenderer->threadState == PROXY_THREAD_BUSY) {
 		ConditionWake(&proxyRenderer->toThreadCond);
 		ConditionWait(&proxyRenderer->fromThreadCond, &proxyRenderer->mutex);
 	}
-	if (proxyRenderer->threadState == PROXY_THREAD_IDLE) {
-		proxyRenderer->threadState = PROXY_THREAD_STOPPED;
-		ConditionWake(&proxyRenderer->toThreadCond);
-		waiting = true;
-	}
+	proxyRenderer->threadState = PROXY_THREAD_STOPPED;
+	ConditionWake(&proxyRenderer->toThreadCond);
 	MutexUnlock(&proxyRenderer->mutex);
-	if (waiting) {
-		ThreadJoin(&proxyRenderer->thread);
-	}
+	// STOPPED can also mean a FIFO error. That thread still has to finish
+	// unlocking this mutex before its queue and synchronization objects die.
+	ThreadJoin(&proxyRenderer->thread);
 	RingFIFODeinit(&proxyRenderer->dirtyQueue);
 	ConditionDeinit(&proxyRenderer->fromThreadCond);
 	ConditionDeinit(&proxyRenderer->toThreadCond);
@@ -194,12 +191,13 @@ static THREAD_ENTRY _proxyThread(void* logger) {
 			proxyRenderer->event = 0;
 		} else {
 			MutexUnlock(&proxyRenderer->mutex);
-			if (!mVideoLoggerRendererRun(&proxyRenderer->d, false)) {
+			bool ok = mVideoLoggerRendererRun(&proxyRenderer->d, false);
+			MutexLock(&proxyRenderer->mutex);
+			if (!ok) {
 				// FIFO was corrupted
 				proxyRenderer->threadState = PROXY_THREAD_STOPPED;
 				mLOG(GBA_VIDEO, ERROR, "Proxy thread queue got corrupted!");
 			}
-			MutexLock(&proxyRenderer->mutex);
 		}
 		ConditionWake(&proxyRenderer->fromThreadCond);
 		if (proxyRenderer->threadState != PROXY_THREAD_STOPPED) {

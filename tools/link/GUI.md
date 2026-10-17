@@ -140,6 +140,15 @@ The regular Vs./Battle GUI cases measure 600 video frames after the native
 race counter begins advancing; movement is deferred during that measurement
 so a completed Battle's frozen counter cannot produce a false speed failure.
 
+For backend startup diagnostics, `MGBA_RING_GUI_DISPLAY=1` requests an OpenGL
+window and `MGBA_RING_GUI_HARDWARE=1` requests the hardware GBA renderer.
+`MGBA_RING_GUI_THREADED=0|1` controls the native software rendering worker.
+`MGBA_RING_GUI_STARTUP_FRAMES=60..5100` makes `scriptedLaunch` run a shorter
+eight-window startup/closure check. Hardware checks wait for attachment and
+verify the active GBA renderer ID on every console, rather than just compiled
+support. `threadedVideoReset` separately exercises repeated software resets
+and renderer reloads using the supplied ROM and real BIOS.
+
 For moving, host-clock audio validation, set `MGBA_RING_GUI_AUDIO=1` for
 eight SDL outputs or `MGBA_RING_GUI_AUDIO=qt` for the actual Qt Multimedia
 outputs. Run `ring:vs-8` with a real audio server; the dummy SDL driver does
@@ -197,3 +206,11 @@ improvements remain enabled. Other platforms retain automatic rendering workers.
 An explicit `-C threadedVideo=1` remains available for isolating the Windows
 worker defect. The worker's underlying Windows corruption and the performance
 of the synchronous fallback have not yet been validated as resolved.
+
+A sanitizer run with hardware rendering reproduced a separate unsafe handoff:
+rebuilding the active video proxy changed its backend while the old native
+worker was still reading queued packets, reaching the GL renderer before its
+memory was initialized. Renderer changes and resets now drain and stop the
+old consumer before reusing that proxy. Eight hardware-rendered windows and
+repeated software resets/reloads pass ASan/UBSan on Linux. Native Windows
+validation is still required before re-enabling its worker default.

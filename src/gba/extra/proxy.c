@@ -134,13 +134,16 @@ void GBAVideoProxyRendererUnshim(struct GBAVideo* video, struct GBAVideoProxyRen
 	if (video->renderer != &renderer->d) {
 		return;
 	}
+	// A consumer can still be reading the backend and its private memory.
+	// Drain and stop it before restoring pointers or reusing this proxy.
+	mVideoLoggerRendererFlush(renderer->logger);
+	mVideoLoggerRendererDeinit(renderer->logger);
 	renderer->backend->cache = video->renderer->cache;
 	video->renderer = renderer->backend;
 	renderer->backend->palette = video->palette;
 	renderer->backend->vram = video->vram;
 	renderer->backend->oam = &video->oam;
 
-	mVideoLoggerRendererDeinit(renderer->logger);
 }
 
 void GBAVideoProxyRendererInit(struct GBAVideoRenderer* renderer) {
