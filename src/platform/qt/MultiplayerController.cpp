@@ -257,7 +257,15 @@ bool MultiplayerController::attachGame(CoreController* controller) {
             // Cable timing requires one ordered CPU executor, but scanline
             // rendering does not. Keep it on the core's existing video worker
             // so linked windows can use the host's other CPU cores.
+#ifdef _WIN32
+            // The native rendering worker corrupts the heap during ring
+            // startup on Windows (bisected to its automatic enablement).
+            // Preserve explicit overrides for diagnosis; an unset option
+            // must follow the verified, synchronous rendering path there.
+            mCoreConfigSetDefaultIntValue(&thread->core->config, "threadedVideo", 0);
+#else
             mCoreConfigSetDefaultIntValue(&thread->core->config, "threadedVideo", 1);
+#endif
 #endif
 			player.node.ring = new GBASIORingThreadNode;
 			if (!GBASIORingThreadAttach(&m_ringCoordinator, player.node.ring, thread)) {

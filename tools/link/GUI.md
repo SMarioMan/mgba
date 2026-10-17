@@ -187,3 +187,13 @@ boundaries. These portable ownership checks pass under AddressSanitizer and
 UndefinedBehaviorSanitizer on Linux. They do not establish that the reported
 Windows `0xc0000374` startup regression is resolved; that exception identifies
 heap corruption but supplies no allocation or corruption stack.
+
+The Windows ring launcher now leaves the native `threadedVideo` worker off
+when it has not been configured explicitly. The user bisected the heap crash
+to `07c2af334491c6d0db84c63ff9f90c6c22d81ef9` (repaired-history ID
+`4db58d156`), which enabled this worker automatically, and verified that the
+same launch succeeds with `-C threadedVideo=0`. Other ring scheduling and audio
+improvements remain enabled. Other platforms retain automatic rendering workers.
+An explicit `-C threadedVideo=1` remains available for isolating the Windows
+worker defect. The worker's underlying Windows corruption and the performance
+of the synchronous fallback have not yet been validated as resolved.
