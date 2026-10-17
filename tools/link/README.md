@@ -83,6 +83,11 @@ avoiding suspension of a COMMIT that is still returning. This only controls emul
 `--trace-memory ADDRESS --trace-file PATH` observes a 16-byte range on console
 zero and writes frame, PC, address, width, access kind, and written value as CSV;
 this option requires `ENABLE_DEBUGGERS`.
+`--trace-from-frame N` delays attaching that watchpoint and its BIOS exception
+breakpoints until all consoles reach frame N. Earlier frames run without the
+debugger, making a late-race fault much faster to investigate. The default is
+zero. A nonzero start requires a trace file and memory address, and cannot
+exceed the run length or `--trace-stop-frame`.
 `--trace-stop-frame N` stops on the first traced write at or after frame N,
 prints the live CPU registers, and exits nonzero as an intentional debug stop.
 Illegal opcodes also fail the runner instead of endlessly producing diagnostics.

@@ -515,7 +515,7 @@ int main(int argc, char** argv) {
     bool untilWatch = false;
 	uint32_t traceAddress = 0;
 	unsigned tracePlayer = 0;
-	unsigned traceStopFrame = UINT_MAX, profileUntil = UINT_MAX, profileFrom = UINT_MAX;
+	unsigned traceFromFrame = 0, traceStopFrame = UINT_MAX, profileUntil = UINT_MAX, profileFrom = UINT_MAX;
 	uint32_t dumpAddress = 0, keysAddress = 0x03004F30;
 	uint32_t barrierState = 0, untilScene = 0, autoConfirmScene = 0, releaseScene = 0;
     unsigned settleFrames = 0, firePeriod = 120, fireSpread = 0, autodriveMask = 255;
@@ -551,6 +551,7 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--video-from") && number(value, &n) && n <= 100000) videoFrom = n;
 		else if (!strcmp(option, "--trace-file")) tracePath = value;
 		else if (!strcmp(option, "--trace-player") && number(value, &n) && n < 8) tracePlayer = n;
+		else if (!strcmp(option, "--trace-from-frame") && number(value, &n) && n <= 100000) traceFromFrame = n;
 		else if (!strcmp(option, "--trace-stop-frame") && number(value, &n) && n <= 100000) traceStopFrame = n;
 		else if (!strcmp(option, "--release-inputs-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) releaseScene = n;
 		else if (!strcmp(option, "--until-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) untilScene = n;
@@ -579,7 +580,7 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--restore-frame") && number(value, &n) && n < UINT_MAX) restoreFrame = n;
 		else { fprintf(stderr, "Invalid option: %s %s\n", option, value); return 2; }
 	}
-	if (!rom || (!hle && !bios) || (hle && bios) || players < 1U || players > (ringMode ? 8U : 4U) || !frames || expectHost >= players || tracePlayer >= players || (traceStopFrame != UINT_MAX && !tracePath) || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (settleFrames && !untilScene) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
+	if (!rom || (!hle && !bios) || (hle && bios) || players < 1U || players > (ringMode ? 8U : 4U) || !frames || expectHost >= players || tracePlayer >= players || (traceStopFrame != UINT_MAX && !tracePath) || (traceFromFrame && (!tracePath || !traceAddress || traceFromFrame > frames || traceFromFrame > traceStopFrame)) || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (settleFrames && !untilScene) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
 		fprintf(stderr, "Usage: mgba-link --rom FILE (--bios FILE | --hle) --players 1..4 [--ring (1..8)] [--frames N] [--input CSV] [--screens PREFIX] [--watch ADDRESS] [--expect-poc]\n");
 		return 2;
 	}
@@ -711,24 +712,7 @@ int main(int argc, char** argv) {
 			mTimingSchedule(core->timing, &p[i].quantum, ringQuantum);
 		}
 	}
-#ifdef ENABLE_DEBUGGERS
-	if (tracePath && traceAddress) {
-		trace.output = fopen(tracePath, "w");
-		if (!trace.output) { perror(tracePath); goto done; }
-		mDebuggerInit(&debugger);
-		mDebuggerAttach(&debugger, p[tracePlayer].core);
-		mDebuggerAttachModule(&debugger, &trace.module);
-		debuggerAttached = true;
-		struct mWatchpoint wp = { .segment = -1, .minAddress = traceAddress, .maxAddress = traceAddress + 16, .type = WATCHPOINT_RW };
-		if (debugger.platform->setWatchpoint(debugger.platform, &trace.module, &wp) < 0) goto done;
-        struct mBreakpoint bp = { .segment = -1, .address = 0x3B4, .type = BREAKPOINT_HARDWARE };
-        if (debugger.platform->setBreakpoint(debugger.platform, &trace.module, &bp) < 0) goto done;
-        bp.address = 0;
-        if (debugger.platform->setBreakpoint(debugger.platform, &trace.module, &bp) < 0) goto done;
-        bp.address = 4;
-        if (debugger.platform->setBreakpoint(debugger.platform, &trace.module, &bp) < 0) goto done;
-	}
-#endif
+
 	/* Input rows affect only the hardware keypad. The ring scheduling event
      * bounds BIOS HALT intervals to the selected quantum; stock sleep/wake is respected. */
 	uint64_t steps = 0;
@@ -759,6 +743,24 @@ int main(int argc, char** argv) {
 			unsigned f = p[i].core->frameCounter(p[i].core);
 			if (f < minFrame) minFrame = f;
 		}
+#ifdef ENABLE_DEBUGGERS
+	if (tracePath && traceAddress && !debuggerAttached && minFrame >= traceFromFrame) {
+		trace.output = fopen(tracePath, "w");
+		if (!trace.output) { perror(tracePath); goto done; }
+		mDebuggerInit(&debugger);
+		mDebuggerAttach(&debugger, p[tracePlayer].core);
+		mDebuggerAttachModule(&debugger, &trace.module);
+		debuggerAttached = true;
+		struct mWatchpoint wp = { .segment = -1, .minAddress = traceAddress, .maxAddress = traceAddress + 16, .type = WATCHPOINT_RW };
+		if (debugger.platform->setWatchpoint(debugger.platform, &trace.module, &wp) < 0) goto done;
+        struct mBreakpoint bp = { .segment = -1, .address = 0x3B4, .type = BREAKPOINT_HARDWARE };
+        if (debugger.platform->setBreakpoint(debugger.platform, &trace.module, &bp) < 0) goto done;
+        bp.address = 0;
+        if (debugger.platform->setBreakpoint(debugger.platform, &trace.module, &bp) < 0) goto done;
+        bp.address = 4;
+        if (debugger.platform->setBreakpoint(debugger.platform, &trace.module, &bp) < 0) goto done;
+	}
+#endif
 		if (minFrame >= breakFrame) ring.openInputs = 1;
 		if (minFrame >= restoreFrame) ring.openInputs = 0;
 		if (barrierState && minFrame > frames + 240) {
