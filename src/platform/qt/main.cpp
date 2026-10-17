@@ -161,20 +161,17 @@ int main(int argc, char* argv[]) {
 }
 
 #ifdef _WIN32
-#include <mgba-util/string.h>
-#include <vector>
+#include "CommandLineArguments.h"
 
 extern "C"
 int wmain(int argc, wchar_t* argv[]) {
-	std::vector<char*> argv8;
-	for (int i = 0; i < argc; ++i) {
-		argv8.push_back(utf16to8(reinterpret_cast<uint16_t*>(argv[i]), wcslen(argv[i]) * 2));
-	}
+	QStringList arguments;
+	for (int i = 0; i < argc; ++i) arguments.append(QString::fromWCharArray(argv[i]));
+	CommandLineArguments argv8(arguments);
+	char** originalArgv = __argv;
 	__argv = argv8.data();
 	int ret = main(argc, argv8.data());
-	for (char* ptr : argv8) {
-		free(ptr);
-	}
+	__argv = originalArgv;
 	return ret;
 }
 #endif

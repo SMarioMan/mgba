@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MPL-2.0 */
 #include "platform/qt/ConfigController.h"
+#include "platform/qt/CommandLineArguments.h"
 #include "platform/qt/AudioProcessor.h"
 #ifdef BUILD_QT_MULTIMEDIA
 #include "platform/qt/AudioProcessorQt.h"
@@ -119,6 +120,23 @@ class RingGuiTest : public QObject {
 Q_OBJECT
     Inputs inputs[8];
 private slots:
+    void writableArguments() {
+        // Include power-of-two argc values: the old Windows vector then had
+        // no spare allocation for the mandatory terminating pointer.
+        for (int count = 1; count <= 32; ++count) {
+            QStringList strings;
+            for (int i = 0; i < count; ++i)
+                strings.append(QString::fromUtf8("C:/Games/マリオ カート %1.gba").arg(i));
+            CommandLineArguments arguments(strings);
+            char** argv = arguments.data();
+            QCOMPARE(argv[count], nullptr);
+            for (int i = 0; i < count; ++i) QCOMPARE(QByteArray(argv[i]), strings[i].toUtf8());
+            // Simulate Qt removing an option, leaving a repeated pointer.
+            // Destruction must free each original buffer exactly once.
+            if (count > 1) argv[0] = argv[count - 1];
+            argv[count] = nullptr;
+        }
+    }
     void borrowedFailureLifetime() {
         // A crashed or exiting borrowed core must remain exclusively owned
         // until its callback returns, before the GUI can detach its cable.

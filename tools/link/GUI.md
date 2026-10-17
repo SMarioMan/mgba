@@ -175,3 +175,15 @@ CSV; `--log` preserves its actual test output and exit status. See the MKSC
 `tools/ring/README.md` for complete commands and replay limitations. The normal
 CTest matrix is unchanged; the additional 2–8/GP rows are enabled for visual
 review only.
+
+### Windows startup diagnostics
+
+The Windows entry point keeps the UTF-8 buffers independently of Qt's writable
+argument array. The array always includes `argv[argc] == nullptr`, and the
+original CRT `__argv` is restored before the temporary array is destroyed.
+`writableArguments` in `qt/test-qt-ring_gui` checks Unicode paths and argument
+counts 1–32, including pointer rearrangement and power-of-two allocation
+boundaries. These portable ownership checks pass under AddressSanitizer and
+UndefinedBehaviorSanitizer on Linux. They do not establish that the reported
+Windows `0xc0000374` startup regression is resolved; that exception identifies
+heap corruption but supplies no allocation or corruption stack.
