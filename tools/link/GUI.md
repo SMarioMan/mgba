@@ -42,7 +42,16 @@ Audio/video consumer waits occur outside the cable mutex, on the output owner's
 thread only. A worker yields to a peer needing its consumers instead of waiting
 on that peer's output. This allows GUI pause/reset/close to interrupt the correct
 worker, including when audio/video synchronization is enabled.
-The first cable slot paces the group. Peer outputs use bounded resampling
+The first cable slot paces the group. OpenGL follower windows therefore do
+not apply another swap/frame delay while holding their video mutex. An isolated
+eight-window Qt-audio check reduced follower publication blocking from 16.0 s
+to 4 ms over the run. With synchronous software rendering, throughput improved
+from 57.99 to 58.78 FPS but still underruns on this host. With the native render
+worker enabled it reached 59.99 FPS, one simulation update per video frame,
+zero dropped PCM and zero underruns on all eight outputs. These are one-minute
+gameplay measurements with a private PulseAudio sink and Xvfb, not native
+Windows or physical-speaker validation. Extended combined checks remain open.
+Peer outputs use bounded resampling
 correction for independent audio-device clocks. Interpolation runs outside
 the producer mutex, and the existing threaded scanline renderer is enabled
 by default for ring sessions unless explicitly configured otherwise.

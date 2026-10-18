@@ -543,6 +543,13 @@ private slots:
             // Wait for its audio setup before topology changes can recreate
             // the output; otherwise the test retains a startup-era pointer.
             QTRY_VERIFY_WITH_TIMEOUT(window->audioProcessor(), 10000);
+            if (qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE")) {
+                QVERIFY2(controller->supportsFeature(CoreController::Feature::OPENGL), "Hardware GBA renderer is disabled in this build");
+                QTRY_VERIFY_WITH_TIMEOUT(controller->hardwareAccelerated(), 10000);
+                CoreController::Interrupter interrupter(controller);
+                auto gba = static_cast<GBA*>(controller->thread()->core->board);
+                QCOMPARE(gba->video.renderer->rendererId(gba->video.renderer), uint32_t(0x6E726C67));
+            }
 			if (lateBoot && !i) {
 				controller->setPaused(false);
 				// The GUI counter briefly holds UINT64_MAX during reset. Wait for

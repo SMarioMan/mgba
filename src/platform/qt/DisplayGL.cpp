@@ -868,7 +868,10 @@ void PainterGL::draw() {
 		}
 		return;
 	}
-	int wantSwap = sync->audioWait || sync->videoFrameWait;
+	// Ring peers follow the reference core's clock. Sleeping here while
+	// holding their video mutex can stall that shared executor and starve
+	// every audio output, even though this peer must not pace emulation.
+	int wantSwap = !sync->externalPacing && (sync->audioWait || sync->videoFrameWait);
 	if (m_swapInterval != wantSwap) {
 		swapInterval(wantSwap);
 	}
