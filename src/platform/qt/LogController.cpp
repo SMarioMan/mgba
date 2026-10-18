@@ -9,6 +9,7 @@
 #include <QLoggingCategory>
 #include <QMessageBox>
 #include <QTextStream>
+#include <QThread>
 
 #include "ConfigController.h"
 
@@ -103,6 +104,14 @@ void LogController::save(ConfigController* config) const {
 }
 
 void LogController::postLog(int level, int category, const QString& string) {
+	// Audio/backend workers use Log::Stream too. Filtering and file output
+	// share GUI-owned state with load()/setLogFile(); never access that state
+	// on a producer thread while another window is reloading its settings.
+	if (QThread::currentThread() != thread()) {
+		QMetaObject::invokeMethod(this, "postLog", Qt::QueuedConnection,
+		                          Q_ARG(int, level), Q_ARG(int, category), Q_ARG(QString, string));
+		return;
+	}
 	if (!mLogFilterTest(&m_filter, category, static_cast<mLogLevel>(level))) {
 		return;
 	}

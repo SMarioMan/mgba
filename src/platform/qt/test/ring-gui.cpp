@@ -10,6 +10,7 @@
 #include "platform/qt/GBAApp.h"
 #include "platform/qt/Window.h"
 #include "platform/qt/DisplayGL.h"
+#include "platform/qt/LogController.h"
 #include <mgba/internal/gba/gba.h>
 #include <mgba/internal/gba/sio/ring.h>
 #include <mgba/feature/thread-proxy.h>
@@ -125,6 +126,27 @@ class RingGuiTest : public QObject {
 Q_OBJECT
     Inputs inputs[8];
 private slots:
+    void workerLogDelivery() {
+        LogController logger(mLOG_WARN);
+        QSignalSpy messages(&logger, &LogController::logPosted);
+        bool deliveredOnOwner = false;
+        connect(&logger, &LogController::logPosted, &logger, [&]() {
+            deliveredOnOwner = QThread::currentThread() == logger.thread();
+        }, Qt::DirectConnection);
+        int category = mLogCategoryById("platform.qt");
+        QVERIFY(category >= 0);
+        std::thread producer([&]() {
+            logger.postLog(mLOG_DEBUG, category, "filtered worker message");
+            logger.postLog(mLOG_WARN, category, "worker message");
+        });
+        producer.join();
+        // The producer must enqueue without touching filters, file streams
+        // or signal subscribers owned by this test's GUI thread.
+        QCOMPARE(messages.count(), 0);
+        QTRY_COMPARE(messages.count(), 1);
+        QVERIFY(deliveredOnOwner);
+        QCOMPARE(messages[0][2].toString(), QString("worker message"));
+    }
     void threadedVideoFailedConsumer() {
 #if defined(DISABLE_THREADING) || defined(MINIMAL_CORE)
         QSKIP("Threaded GBA rendering is disabled in this build");
