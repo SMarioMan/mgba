@@ -8,13 +8,15 @@
 CXX_GUARD_START
 
 #define GBA_RING_MAX_PLAYERS 8
+/* Eight racers and one optional forwarding map display. */
+#define GBA_RING_MAX_NODES (GBA_RING_MAX_PLAYERS + 1)
 
 /* Single-threaded, shared-clock normal-mode cable: SO[i] -> SI[i+1].
  * Run attached cores in timestamp order. This is independent of the four
  * hardware multiplayer slots and does not change MAX_GBAS or savestates. */
 struct GBASIORingDriver;
 struct GBASIORing {
-	struct GBASIORingDriver* players[GBA_RING_MAX_PLAYERS];
+	struct GBASIORingDriver* players[GBA_RING_MAX_NODES];
 	unsigned count;
 	uint64_t transfers;
 	uint64_t missedReceivers;
@@ -23,7 +25,7 @@ struct GBASIORing {
 	struct GBASIORingDriver* clockOwner;
 	bool ownerFinished;
 	/* Test wiring: bit i opens the SO[i-1] -> SI[i] connection. */
-	uint8_t openInputs;
+	uint16_t openInputs;
 };
 
 struct GBASIORingDriver {

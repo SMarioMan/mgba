@@ -61,4 +61,54 @@ M_TEST_DEFINE(ownerCompletion) {
 	}
 }
 
-M_TEST_SUITE_DEFINE(GBARing, cmocka_unit_test(ownerCompletion))
+M_TEST_DEFINE(nineNodeRing) {
+	struct mCore* cores[GBA_RING_MAX_NODES];
+	struct GBASIORingDriver drivers[GBA_RING_MAX_NODES], excess;
+	struct GBASIORing ring;
+	GBASIORingInit(&ring);
+	for (unsigned i = 0; i < GBA_RING_MAX_NODES; ++i) {
+		cores[i] = GBACoreCreate();
+		assert_true(cores[i]->init(cores[i]));
+		mCoreInitConfig(cores[i], NULL);
+		cores[i]->reset(cores[i]);
+		assert_true(GBASIORingAttach(&ring, &drivers[i]));
+		GBASIOSetDriver(&((struct GBA*) cores[i]->board)->sio, &drivers[i].d);
+		cores[i]->busWrite16(cores[i], 0x04000134, 0);
+		cores[i]->busWrite16(cores[i], 0x04000128, 0x5002);
+		cores[i]->busWrite32(cores[i], 0x04000120, 0x13572460 + i);
+	}
+	assert_false(GBASIORingAttach(&ring, &excess));
+	for (unsigned i = 0; i < GBA_RING_MAX_NODES; ++i)
+		if (i != 4) cores[i]->busWrite16(cores[i], 0x04000128, 0x5082);
+	cores[4]->busWrite16(cores[4], 0x04000128, 0x5083);
+	assert_int_equal(ring.pending, GBA_RING_MAX_NODES);
+	finish(&drivers[4]);
+	assert_true(ring.ownerFinished);
+	for (unsigned i = 0; i < GBA_RING_MAX_NODES; ++i)
+		if (i != 4) finish(&drivers[i]);
+	assert_int_equal(ring.pending, 0);
+	assert_int_equal(ring.collisions, 0);
+	for (unsigned i = 0; i < GBA_RING_MAX_NODES; ++i) {
+		assert_int_equal(cores[i]->busRead32(cores[i], 0x04000120),
+			0x13572460 + (i + GBA_RING_MAX_NODES - 1) % GBA_RING_MAX_NODES);
+		cores[i]->busWrite32(cores[i], 0x04000120, 0x24681350 + i);
+	}
+	/* The extra wire needs a ninth mask bit; an eight-bit mask silently
+	 * leaves the display input connected during a cable-fault test. */
+	ring.openInputs = 1U << (GBA_RING_MAX_NODES - 1);
+	for (unsigned i = 0; i < GBA_RING_MAX_NODES; ++i)
+		if (i != 4) cores[i]->busWrite16(cores[i], 0x04000128, 0x5082);
+	cores[4]->busWrite16(cores[4], 0x04000128, 0x5083);
+	for (unsigned i = 0; i < GBA_RING_MAX_NODES; ++i) finish(&drivers[i]);
+	assert_int_equal(ring.pending, 0);
+	for (unsigned i = 0; i < GBA_RING_MAX_NODES; ++i) {
+		assert_int_equal(cores[i]->busRead32(cores[i], 0x04000120), i == GBA_RING_MAX_NODES - 1
+			? UINT32_MAX : 0x24681350 + (i + GBA_RING_MAX_NODES - 1) % GBA_RING_MAX_NODES);
+		GBASIORingDetach(&drivers[i]);
+		GBASIOSetDriver(&((struct GBA*) cores[i]->board)->sio, NULL);
+		mCoreConfigDeinit(&cores[i]->config);
+		cores[i]->deinit(cores[i]);
+	}
+}
+
+M_TEST_SUITE_DEFINE(GBARing, cmocka_unit_test(ownerCompletion), cmocka_unit_test(nineNodeRing))

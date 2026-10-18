@@ -22,6 +22,7 @@
 static const mOption s_frontendOptions[] = {
 	{ "ecard", true, '\0' },
 	{ "ring-players", true, '\0' },
+	{ "ring-map-rom", true, '\0' },
 	{ "instance-settings", true, '\0' },
 	{ "hide-menu", false, '\0' },
 	{ "mb", true, '\0' },
@@ -169,6 +170,7 @@ ConfigController::ConfigController(QObject* parent, const QString& directory)
 
 	m_subparsers[1].usage = "Frontend options:\n"
 	      "  --ring-players N  Open 2..8 ring windows running the one supplied ROM\n"
+	      "  --ring-map-rom FILE  Append a dedicated map-display ROM to that ring\n"
 	      "  --instance-settings DIR  Save independent P1..P8 configurations in DIR\n"
 	      "  --hide-menu    Hide window menu bars (Alt shows them temporarily)\n"
 	      "  --ecard FILE   Scan an e-Reader card in the first loaded game\n"
@@ -191,6 +193,10 @@ ConfigController::ConfigController(QObject* parent, const QString& directory)
 			return true;
 		}
 		if (optionName == QLatin1String("instance-settings")) {
+			self->m_argvOptions[optionName] = QString::fromUtf8(arg);
+			return !self->m_argvOptions[optionName].toString().isEmpty();
+		}
+		if (optionName == QLatin1String("ring-map-rom")) {
 			self->m_argvOptions[optionName] = QString::fromUtf8(arg);
 			return !self->m_argvOptions[optionName].toString().isEmpty();
 		}
@@ -254,6 +260,10 @@ bool ConfigController::parseArguments(int argc, char* argv[]) {
 	}
 
 	if (mArgumentsParse(&m_args, argc, argv, m_subparsers.data(), m_subparsers.size())) {
+		if (m_argvOptions.contains("ring-map-rom") && !m_argvOptions.contains("ring-players") && !m_args.showHelp && !m_args.showVersion) {
+			mArgumentsDeinit(&m_args);
+			return false;
+		}
 		if (m_argvOptions.contains("ring-players") && (m_argvOptions["ring-players"].toInt() < 2 || m_argvOptions["ring-players"].toInt() > 8 || !m_args.fname || !m_fnames.isEmpty()) && !m_args.showHelp && !m_args.showVersion) {
 			mArgumentsDeinit(&m_args);
 			return false;
@@ -266,6 +276,7 @@ bool ConfigController::parseArguments(int argc, char* argv[]) {
 		m_parsed = true;
 		return true;
 	}
+	mArgumentsDeinit(&m_args);
 	return false;
 }
 

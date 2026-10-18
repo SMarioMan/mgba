@@ -24,7 +24,8 @@ struct VDirEntry;
 namespace QGBA {
 
 // Frontend windows/controllers; hardware multiplayer slots remain MAX_GBAS.
-constexpr int MAX_LOCAL_PLAYERS = 8;
+// Eight racers plus one optional ring map-display window.
+constexpr int MAX_LOCAL_PLAYERS = 9;
 
 enum class Endian {
 	NONE    = 0b00,

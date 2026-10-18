@@ -45,7 +45,12 @@ public:
 	int saveId(CoreController*) const;
 	bool setRingTopology(bool ring);
 	bool ringTopology() const { return m_ringTopology; }
-	int maxPlayers() const { return m_ringTopology ? 8 : 4; }
+	int maxPlayers() const {
+#ifdef M_CORE_GBA
+        if (m_ringTopology) return GBA_RING_MAX_NODES;
+#endif
+        return 4;
+    }
 
 signals:
 	void gameAttached();

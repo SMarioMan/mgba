@@ -76,8 +76,8 @@ static uint16_t _ring_write(struct GBASIODriver* d, uint16_t value) {
 		++ring->collisions;
 		return GBASIONormalClearStart(value);
 	}
-	uint32_t outgoing[GBA_RING_MAX_PLAYERS];
-	bool receiving[GBA_RING_MAX_PLAYERS];
+	uint32_t outgoing[GBA_RING_MAX_NODES];
+	bool receiving[GBA_RING_MAX_NODES];
 	for (unsigned i = 0; i < ring->count; ++i) {
 		struct GBASIO* sio = ring->players[i]->d.p;
 		receiving[i] = sio->mode == d->p->mode && (i == p->slot || GBASIONormalIsStart(sio->siocnt));
@@ -146,7 +146,7 @@ void GBASIORingInit(struct GBASIORing* ring) {
 }
 
 bool GBASIORingAttach(struct GBASIORing* ring, struct GBASIORingDriver* p) {
-	if (ring->count == GBA_RING_MAX_PLAYERS || ring->pending) {
+	if (ring->count == GBA_RING_MAX_NODES || ring->pending) {
 		return false;
 	}
 	for (unsigned i = 0; i < ring->count; ++i) {

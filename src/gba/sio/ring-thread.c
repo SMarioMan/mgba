@@ -134,7 +134,7 @@ static void _run(struct mCoreThread* thread) {
     }
     _refreshInterval(coordinator);
 	struct GBASIORingThreadNode* next = _nextBatch(coordinator);
-	bool borrowed[GBA_RING_MAX_PLAYERS] = {false};
+	bool borrowed[GBA_RING_MAX_NODES] = {false};
 	/* Execute short serial slices cooperatively while the other owning
 	 * threads sleep on WAIT. Preserve the same timestamp ordering without
 	 * paying for a kernel thread handoff for each 32-bit cable word. */
@@ -199,7 +199,7 @@ static void _cancel(struct GBASIORingThreadCoordinator* coordinator) {
 }
 
 bool GBASIORingThreadAttach(struct GBASIORingThreadCoordinator* coordinator, struct GBASIORingThreadNode* node, struct mCoreThread* thread) {
-	if (thread->runLoopOverride || thread->resetOverride || coordinator->ring.count == GBA_RING_MAX_PLAYERS) return false;
+	if (thread->runLoopOverride || thread->resetOverride || coordinator->ring.count == GBA_RING_MAX_NODES) return false;
 	MutexLock(&coordinator->mutex);
 	_cancel(coordinator);
 	memset(node, 0, sizeof(*node));

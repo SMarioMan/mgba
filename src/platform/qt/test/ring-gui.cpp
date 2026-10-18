@@ -124,7 +124,7 @@ struct Inputs {
 
 class RingGuiTest : public QObject {
 Q_OBJECT
-    Inputs inputs[8];
+    Inputs inputs[GBA_RING_MAX_NODES];
 private slots:
     void workerLogDelivery() {
         LogController logger(mLOG_WARN);
@@ -222,6 +222,23 @@ private slots:
             argv[count] = nullptr;
         }
     }
+    void mapArguments() {
+        QTemporaryDir settings;
+        {
+            ConfigController parsed(nullptr, settings.path());
+            CommandLineArguments arguments({"mGBA", "--ring-players", "8", "--ring-map-rom", "map.gba", "race.gba"});
+            QVERIFY(parsed.parseArguments(6, arguments.data()));
+            QCOMPARE(parsed.getArgvOption("ring-players").toInt(), 8);
+            QCOMPARE(parsed.getArgvOption("ring-map-rom").toString(), QString("map.gba"));
+        }
+        for (const QStringList& values : {
+                QStringList{"mGBA", "--ring-map-rom", "map.gba", "race.gba"},
+                QStringList{"mGBA", "--ring-players", "9", "--ring-map-rom", "map.gba", "race.gba"}}) {
+            ConfigController parsed(nullptr, settings.path());
+            CommandLineArguments arguments(values);
+            QVERIFY(!parsed.parseArguments(values.size(), arguments.data()));
+        }
+    }
     void borrowedFailureLifetime() {
         // A crashed or exiting borrowed core must remain exclusively owned
         // until its callback returns, before the GUI can detach its cable.
@@ -300,17 +317,21 @@ private slots:
         QTemporaryDir settings;
         QString rom = qEnvironmentVariable("MGBA_RING_GUI_BOOT_ROM");
         if (rom.isEmpty()) QSKIP("Set MGBA_RING_GUI_BOOT_ROM to a --boot-ring ROM");
-        QByteArray directory = settings.path().toUtf8(), romArg = rom.toUtf8();
-        char arg0[] = "mgba-qt", flag[] = "--ring-players", count[] = "8";
-        char profile[] = "--instance-settings", hidden[] = "--hide-menu", biosFlag[] = "--bios";
         QByteArray bios = qEnvironmentVariable("MGBA_RING_GUI_BIOS").toUtf8();
+        QString mapRom = qEnvironmentVariable("MGBA_RING_GUI_MAP_ROM");
+        int launched = mapRom.isEmpty() ? 8 : 9;
+        QStringList values{"mGBA", "--ring-players", "8", "--instance-settings", settings.path(),
+                           "--hide-menu", "--bios", QString::fromUtf8(bios)};
+        if (!mapRom.isEmpty()) values << "--ring-map-rom" << mapRom;
+        values << rom;
+        CommandLineArguments arguments(values);
         config->setOption("gba.bios", "");
-        char* argv[] = {arg0, flag, count, profile, directory.data(), hidden, biosFlag, bios.data(), romArg.data(), nullptr};
-        QVERIFY(config->parseArguments(9, argv));
+        QVERIFY(config->parseArguments(values.size(), arguments.data()));
         QVERIFY(app->multiplayer()->setRingTopology(true));
         QVERIFY(app->newWindow());
         app->initMultiplayer();
-        QCOMPARE(app->windows().size(), 8);
+        QCOMPARE(app->windows().size(), launched);
+        if (launched == GBA_RING_MAX_NODES) QVERIFY(!app->newWindow());
         // A short startup replay isolates backend initialization from ROM menu
         // input. The ordinary full gameplay/settings regression stays intact.
         int startupFrames = qEnvironmentVariableIntValue("MGBA_RING_GUI_STARTUP_FRAMES");
@@ -366,7 +387,7 @@ private slots:
             inputs[slot].events.append(qMakePair(frame >= 2000 ? frame + 600 : frame, fields[2].toUInt(nullptr,16)));
         }
         auto windows = app->windows();
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < launched; ++i) {
             Window* window = windows[i];
             auto controller = window->controller();
             QVERIFY(controller);
@@ -376,7 +397,7 @@ private slots:
             if (qEnvironmentVariableIntValue("MGBA_RING_GUI_DISPLAY") == 1)
                 QVERIFY2(window->findChild<DisplayGL*>(), "Requested OpenGL display was not created");
 #endif
-            QVERIFY(window->windowTitle().endsWith(QString(" - P%1").arg(i+1)));
+            QTRY_VERIFY2_WITH_TIMEOUT(window->windowTitle().endsWith(i == 8 ? QString(" - Map") : QString(" - P%1").arg(i+1)), qPrintable(window->windowTitle()), 10000);
             QVERIFY(!window->menuBar()->isVisible());
             inputs[i].controller = controller.get();
             inputs[i].measureSpeed = true;
@@ -403,7 +424,7 @@ private slots:
             }
         }
         QVERIFY(finished);
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < launched; ++i) {
             auto controller = windows[i]->controller();
             CoreController::Interrupter interrupter(controller.get());
             auto core = controller->thread()->core;
@@ -411,6 +432,11 @@ private slots:
             QCOMPARE(core->rawRead8(core, 0x0300361B, -1), 8U);
             QCOMPARE(core->rawRead32(core, 0x03006B98, -1), 0U);
             QCOMPARE(core->rawRead32(core, 0x03006B9C, -1), 0U);
+            if (i == 8) {
+                QCOMPARE(core->rawRead16(core, 0x04000000, -1), 0x1441U);
+                for (unsigned channel = 0; channel < 11; ++channel)
+                    QCOMPARE(core->rawRead32(core, 0x0203ED00 + channel * 4, -1), 0U);
+            }
             QVERIFY(inputs[i].speedComplete);
             double rate = double(inputs[i].lastSimulation - inputs[i].firstSimulation) / inputs[i].speedWindow;
             qInfo("Scripted P%d speed %.3f native updates/video frame", i+1, rate);
@@ -427,13 +453,13 @@ private slots:
         }
         QString closedDirectory = windows[1]->config()->instanceDirectory();
         windows[1]->close();
-        QTRY_COMPARE_WITH_TIMEOUT(app->windows().size(), 7, 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(app->windows().size(), launched - 1, 10000);
         Window* replacement = app->newWindow();
         QVERIFY(replacement);
         QCOMPARE(replacement->config()->instanceDirectory(), closedDirectory);
         QSet<QString> directories;
         for (Window* w : app->windows()) directories.insert(w->config()->instanceDirectory());
-        QCOMPARE(directories.size(), 8);
+        QCOMPARE(directories.size(), launched);
 
     }
 	void menuLifetime() {
@@ -508,7 +534,7 @@ private slots:
 		});
 		topology->trigger();
 		QCOMPARE(app->multiplayer()->ringTopology(), ringTopology);
-		QCOMPARE(app->multiplayer()->maxPlayers(), ringTopology ? 8 : 4);
+		QCOMPARE(app->multiplayer()->maxPlayers(), ringTopology ? GBA_RING_MAX_NODES : 4);
 		if (!ringTopology && qEnvironmentVariableIsEmpty("MGBA_RING_GUI_STOCK_INPUTS")) QSKIP("Set MGBA_RING_GUI_STOCK_INPUTS to the stock input fixtures directory");
         QString fixturePath = qEnvironmentVariable("MGBA_RING_GUI_REPLAY");
         if (fixturePath.isEmpty()) fixturePath = ringTopology ? qEnvironmentVariable("MGBA_RING_GUI_INPUTS") + QString("/%1-%2.csv").arg(mode).arg(players)
@@ -661,7 +687,7 @@ private slots:
         QVERIFY2(!qtAudioCheck, "Qt delivery validation requires Qt Multimedia");
 #endif
 		for (Window* window : windows) window->controller()->setPaused(false);
-		if (players == 8) { QVERIFY(!app->newWindow()); QVERIFY(!app->multiplayer()->setRingTopology(false)); }
+		if (players == 8) { QVERIFY(!app->multiplayer()->setRingTopology(false)); }
 		bool entered = false;
 		QElapsedTimer timer;
 		timer.start();

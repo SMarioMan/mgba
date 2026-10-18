@@ -1295,7 +1295,8 @@ void Window::updateTitle(float fps) {
 
 		MultiplayerController* multiplayer = m_controller->multiplayerController();
 		if (multiplayer && multiplayer->attached() > 1) {
-			title += tr(" -  Player %1 of %2").arg(m_playerId + 1).arg(multiplayer->attached());
+			if (!multiplayer->ringTopology())
+				title += tr(" -  Player %1 of %2").arg(m_playerId + 1).arg(multiplayer->attached());
 			for (auto& action : m_nonMpActions) {
 				action->setEnabled(false);
 			}
@@ -1313,7 +1314,8 @@ void Window::updateTitle(float fps) {
 		setWindowTitle(tr("%1 - %2 (%3 fps) - %4").arg(projectName).arg(title).arg(fps).arg(projectVersion));
 	}
 	if (GBAApp::app()->multiplayer()->ringTopology())
-		setWindowTitle(windowTitle() + QString(" - P%1").arg(m_playerId + 1));
+		setWindowTitle(windowTitle() + (property("ringMapDisplay").toBool()
+            ? tr(" - Map") : QString(" - P%1").arg(m_playerId + 1)));
 }
 
 void Window::openStateWindow(LoadSave ls) {

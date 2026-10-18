@@ -178,6 +178,15 @@ static void captureFrame(void* context) {
         for (unsigned color = 1; color <= 14; ++color)
             cursorPaletteHash = (cursorPaletteHash ^ player->core->rawRead16(player->core, 0x05000200 + color * 32, -1)) * 16777619U;
         fprintf(videoLog, ",%u", cursorPaletteHash);
+        uint32_t mapOverviewHash = 0;
+        if (dispcnt == 0x1441) {
+            mapOverviewHash = 2166136261U;
+            for (unsigned i = 0; i < 4096; ++i)
+                mapOverviewHash = (mapOverviewHash ^ ((uint8_t*)gba->video.vram)[0x4000 + i]) * 16777619U;
+            for (unsigned i = 0; i < 16; ++i)
+                mapOverviewHash = (mapOverviewHash ^ (gba->video.palette[176 + i] & 0x7FFF)) * 16777619U;
+        }
+        fprintf(videoLog, ",%u", mapOverviewHash);
         for (unsigned i = 0; i < 8; ++i) fprintf(videoLog, ",%u", kartPositions[i]);
         if (soundTable) {
             uint32_t camera = player->core->rawRead32(player->core, 0x03003658, -1);
@@ -329,14 +338,14 @@ struct Route {
  * host happens to return from runLoop. This also matches the Qt test adapter. */
 static struct {
     const struct Input* events;
-    size_t count, next[GBA_RING_MAX_PLAYERS];
-    struct Route routes[GBA_RING_MAX_PLAYERS];
+    size_t count, next[GBA_RING_MAX_NODES];
+    struct Route routes[GBA_RING_MAX_NODES];
     unsigned driveFrom, driveMask, firePeriod, fireSpread;
     uint32_t barrierState, confirmScene, releaseScene, watch, watchValue, watchMask;
     bool autofire, untilWatch, recording, recordingError;
     struct Input* recordedInputs;
     size_t recordedCount, recordedCapacity;
-    unsigned recordedKeys[GBA_RING_MAX_PLAYERS];
+    unsigned recordedKeys[GBA_RING_MAX_NODES];
 } playback;
 
 /* A test driver sends only keypad input. It observes the native checkpoint
@@ -507,6 +516,7 @@ int main(int argc, char** argv) {
 	mLogSetDefaultLogger(&logger);
 	const char *rom = NULL, *bios = NULL, *inputPath = NULL, *prefix = NULL, *tracePath = NULL, *videoPath = NULL;
 	const char* profilePath = NULL;
+	const char* mapRom = NULL;
     const char* audioPrefix = NULL;
 	const char* progressPath = NULL;
 	unsigned players = 0, frames = 600;
@@ -536,6 +546,7 @@ int main(int argc, char** argv) {
 		const char* value = argv[i];
 		unsigned long n;
 		if (!strcmp(option, "--rom")) rom = value;
+		else if (!strcmp(option, "--ring-map-rom")) mapRom = value;
 		else if (!strcmp(option, "--bios")) bios = value;
 		else if (!strcmp(option, "--input")) inputPath = value;
 		else if (!strcmp(option, "--screens")) prefix = value;
@@ -550,7 +561,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(option, "--audio-state") && number(value, &n) && n >= 0x02000000 && n < 0x03008000) audioState = n;
 		else if (!strcmp(option, "--video-from") && number(value, &n) && n <= 100000) videoFrom = n;
 		else if (!strcmp(option, "--trace-file")) tracePath = value;
-		else if (!strcmp(option, "--trace-player") && number(value, &n) && n < 8) tracePlayer = n;
+		else if (!strcmp(option, "--trace-player") && number(value, &n) && n < GBA_RING_MAX_NODES) tracePlayer = n;
 		else if (!strcmp(option, "--trace-from-frame") && number(value, &n) && n <= 100000) traceFromFrame = n;
 		else if (!strcmp(option, "--trace-stop-frame") && number(value, &n) && n <= 100000) traceStopFrame = n;
 		else if (!strcmp(option, "--release-inputs-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) releaseScene = n;
@@ -580,10 +591,12 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--restore-frame") && number(value, &n) && n < UINT_MAX) restoreFrame = n;
 		else { fprintf(stderr, "Invalid option: %s %s\n", option, value); return 2; }
 	}
-	if (!rom || (!hle && !bios) || (hle && bios) || players < 1U || players > (ringMode ? 8U : 4U) || !frames || expectHost >= players || tracePlayer >= players || (traceStopFrame != UINT_MAX && !tracePath) || (traceFromFrame && (!tracePath || !traceAddress || traceFromFrame > frames || traceFromFrame > traceStopFrame)) || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (settleFrames && !untilScene) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
-		fprintf(stderr, "Usage: mgba-link --rom FILE (--bios FILE | --hle) --players 1..4 [--ring (1..8)] [--frames N] [--input CSV] [--screens PREFIX] [--watch ADDRESS] [--expect-poc]\n");
+	if (!rom || (!hle && !bios) || (hle && bios) || players < 1U || players > (ringMode ? GBA_RING_MAX_PLAYERS : 4U) || (mapRom && (!ringMode || players < 2 || expectPoc)) || !frames || expectHost >= players || tracePlayer >= players + !!mapRom || (traceStopFrame != UINT_MAX && !tracePath) || (traceFromFrame && (!tracePath || !traceAddress || traceFromFrame > frames || traceFromFrame > traceStopFrame)) || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (settleFrames && !untilScene) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
+		fprintf(stderr, "Usage: mgba-link --rom FILE (--bios FILE | --hle) --players 1..4 [--ring (1..8 racers)] [--ring-map-rom FILE (adds one display)] [--frames N] [--input CSV] [--screens PREFIX] [--watch ADDRESS] [--expect-poc]\n");
 		return 2;
 	}
+	/* --players counts racers; the optional display is a physical node only. */
+	if (mapRom) ++players;
 	struct Input* inputs = NULL;
 	size_t nInputs = 0;
 	if (inputPath) {
@@ -619,7 +632,7 @@ int main(int argc, char** argv) {
     playback.untilWatch = untilWatch;
     playback.autofire = autofire;
     playback.recording = recordInputPath != NULL;
-    for (unsigned i = 0; i < GBA_RING_MAX_PLAYERS; ++i) playback.recordedKeys[i] = UINT_MAX;
+    for (unsigned i = 0; i < GBA_RING_MAX_NODES; ++i) playback.recordedKeys[i] = UINT_MAX;
 	struct Player* p = calloc(players, sizeof(*p));
 	if (!p) { free(inputs); return 2; }
 	struct GBASIOLockstepCoordinator stock;
@@ -638,7 +651,7 @@ int main(int argc, char** argv) {
 	if (videoPath) {
 		videoLog = fopen(videoPath, "w");
 		if (!videoLog) { perror(videoPath); goto done; }
-        fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus,menuCursors,starMask,shrinkMask,booMask,roadDisplayBuffer,roadWriteBuffer,roadProjectionHash,backdropColor,cursorPaletteHash");
+        fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus,menuCursors,starMask,shrinkMask,booMask,roadDisplayBuffer,roadWriteBuffer,roadProjectionHash,backdropColor,cursorPaletteHash,mapOverviewHash");
         for (unsigned i = 0; i < 8; ++i) fprintf(videoLog, ",kartPosition%u", i);
         if (soundTable) fprintf(videoLog, ",localPlayer,cameraPlayer,fifoSource,pcmBufferEnd,pcmCounter,soundIdent,engineHeader,voiceHeader,effectHeader");
         if (timingState) fprintf(videoLog, ",exchangeCycles,renderCycles,profileFrame,publishCycles,mixCycles");
@@ -692,7 +705,7 @@ int main(int argc, char** argv) {
 				fprintf(stderr, "BIOS/ROM load failed\n"); goto done;
 			}
 		}
-		if (!mCoreLoadFile(core, rom)) { fprintf(stderr, "ROM load failed\n"); goto done; }
+		if (!mCoreLoadFile(core, mapRom && i == players - 1 ? mapRom : rom)) { fprintf(stderr, "ROM load failed\n"); goto done; }
 		struct GBA* gba = core->board;
 		if (ringMode) {
 			if (!GBASIORingAttach(&ring, &p[i].ring)) goto done;
@@ -725,7 +738,7 @@ int main(int argc, char** argv) {
 	uint64_t stagnantSteps = 0;
 	uint32_t barrierRound = 0;
 	int barrierOwner = -1;
-	bool frozen[GBA_RING_MAX_PLAYERS] = { false };
+	bool frozen[GBA_RING_MAX_NODES] = { false };
 	for (;;) {
         if (emulationErrors) {
 #ifdef ENABLE_DEBUGGERS
@@ -1000,6 +1013,21 @@ int main(int argc, char** argv) {
                 if ((obj[0] & 0x300) == 0x200 || (!identityDot && !legacyDot)) continue;
                 printf("%s[%u,%u,%u]", firstDot ? "" : ",", (obj[2] >> 12) - (identityDot ? 0 : 8), obj[1] & 511, obj[0] & 255);
                 firstDot = false;
+            }
+            printf("],\"mapDisplayMarkers\":[");
+            bool firstMapMarker = true;
+            if (core->rawRead16(core, 0x04000000, -1) == 0x1441) {
+                for (unsigned j = 0; j < 128; ++j) {
+                    uint16_t* obj = gba->video.oam.raw + j * 4;
+                    unsigned tile = obj[2] & 1023;
+                    if ((obj[0] & 0x300) || (obj[0] >> 14) || (obj[1] >> 14) != 1 ||
+                        (obj[2] >> 12) != 15 || tile < 0x3E0 || (tile & 3)) continue;
+                    int x = obj[1] & 511, y = obj[0] & 255;
+                    if (x >= 256) x -= 512;
+                    if (y >= 128) y -= 256;
+                    printf("%s[%u,%d,%d]", firstMapMarker ? "" : ",", (tile - 0x3E0) / 4, x + 7, y + 13);
+                    firstMapMarker = false;
+                }
             }
             printf("],\"kartPalettesMatch\":[");
             for (unsigned j = 0; j < 8; ++j) {

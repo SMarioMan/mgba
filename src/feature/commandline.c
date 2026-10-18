@@ -80,6 +80,14 @@ static void _tableApply(const char* key, void* value, void* user) {
 }
 
 bool mArgumentsParse(struct mArguments* args, int argc, char* const* argv, struct mSubParser* subparsers, int nSubparsers) {
+	/* getopt keeps pointers and permutation indices from its previous argv.
+	 * A fresh per-instance parse must not reuse a freed argument buffer. */
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)
+	optreset = 1;
+	optind = 1;
+#else
+	optind = 0;
+#endif
 	int ch;
 	char options[128] =
 		"b:c:C:hl:p:s:t:"

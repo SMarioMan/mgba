@@ -193,6 +193,23 @@ These diagnostics are disabled by default. Queued PCM at an underrun separates
 late sink feeding from an empty emulation FIFO; host scheduling must also be
 measured before attributing a long callback to emulator CPU work.
 
+## Extra ring map window
+
+`--ring-players N --ring-map-rom map.gba racers.gba` starts N human windows
+(2–8), then a dedicated map window. This requires a game implementing the
+map-only role; the MKSC checkout provides `build.py --map-display`. Match all
+other ROM options between the racer and map images. The extra node does not
+increase the human-player limit. Its caption ends in `Map`, and its settings
+use the next instance directory (P9 for eight humans). Stock GBA multiplayer
+still has its ordinary four-console limit.
+
+For the real-BIOS GUI regression, set `MGBA_RING_GUI_MAP_ROM` to the matching
+direct-boot map ROM alongside `MGBA_RING_GUI_BOOT_ROM`, `MGBA_RING_GUI_BIOS`
+and `MGBA_RING_GUI_INPUTS`, then run `test-qt-ring_gui scriptedLaunch`. It
+checks nine-window startup, the map role, silent audio, separate settings,
+menu-bar access, and closing/replacing a linked window. The CLI link runner
+also accepts `--ring-map-rom` alongside `--ring --players N --rom racers.gba`.
+
 ## Instruction profiles
 
 The CLI profiler observes instructions inside the ordinary CPU run-loop quantum,
