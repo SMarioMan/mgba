@@ -142,6 +142,11 @@ bool AudioProcessorQt::start() {
             // After delivery begins, any Idle transition means the sink ran dry.
             if (state == QAudio::ActiveState) m_sinkHasPlayed = true;
             if (state == QAudio::IdleState && m_sinkHasPlayed && !m_waitingForPCM && m_device && m_device->deliveredFrames()) {
+                if (m_tracePump) qInfo("Qt ring sink idle at %lld ms: output=%p currentState=%d error=%d free=%lld buffer=%lld elapsed=%lld processed=%lld",
+                    static_cast<long long>(QDateTime::currentMSecsSinceEpoch()), static_cast<void*>(this),
+                    int(m_audioOutput->state()), int(m_audioOutput->error()),
+                    static_cast<long long>(m_audioOutput->bytesFree()), static_cast<long long>(m_audioOutput->bufferSize()),
+                    static_cast<long long>(m_audioOutput->elapsedUSecs()), static_cast<long long>(m_audioOutput->processedUSecs()));
                 m_underrunEvents.fetch_add(1);
                 m_device->traceUnderrun();
                 if (m_audioPump && !m_recoverQueued) {
@@ -235,7 +240,12 @@ void AudioProcessorQt::pumpAudio() {
         size_t primeFrames = std::min(size_t(m_sampleRate / 10), m_device->bufferCapacity());
         if (queued < qint64(primeFrames * sizeof(mStereoSample))) return;
         m_sinkHasPlayed = false;
-        m_audioOutput->resume();
+        // Start with the backend's normal prebuffering. Resuming the empty
+        // probe stream can explicitly trigger playback before the first
+        // write (PulseAudio does this), leaving its read clock ahead of PCM.
+        m_audioOutput->reset();
+        m_pushDevice = m_audioOutput->start();
+        if (!m_pushDevice) return;
         m_waitingForPCM = false;
     }
     if (!m_pushDevice) return;

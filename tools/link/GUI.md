@@ -58,9 +58,14 @@ zero-underrun combined check remains required. A subsequent five-minute tiled
 run with both sync options enabled holds 60.00 FPS, one native update per
 frame and zero dropped source PCM on all consoles. Qt still reports
 `0/2/0/1/2/1/1/1` underruns: its refill timers paused for 113–137 ms while
-source PCM remained buffered. That Qt delivery failure remains open. The
+source PCM remained buffered. The
 equivalent five-minute SDL run passes at 60.02 FPS with zero source losses
-and zero underrun samples on every output. The short comparisons are one-minute
+and zero underrun samples on every output.
+The Qt probe stream is now replaced with a fresh stream once PCM is ready,
+using normal backend prebuffering. Resuming the empty probe can explicitly
+trigger playback before its first write. With this correction the five-minute
+Qt check also passes at 60.00 FPS with no startup/gameplay underruns and no
+dropped source PCM on all eight outputs. Buffer sizes are unchanged. The short comparisons are one-minute
 gameplay measurements with a private PulseAudio sink and Xvfb, not native
 Windows or physical-speaker validation. Extended combined checks remain open.
 Peer outputs use bounded resampling
