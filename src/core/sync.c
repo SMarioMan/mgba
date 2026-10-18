@@ -23,6 +23,7 @@ static void _changeVideoSync(struct mCoreSync* sync, bool wait) {
 void mCoreSyncLoadCoreOpts(struct mCoreSync* sync, const struct mCoreOptions* opts) {
 	sync->deferWait = false;
 	sync->externalPacing = false;
+	sync->lockstep = false;
 	sync->audioWait = opts->audioSync;
 	sync->videoFrameWait = opts->videoSync;
 	if (opts->fpsTarget) {
@@ -149,11 +150,12 @@ void mCoreSyncWaitDeferred(struct mCoreSync* sync, const struct mAudioBuffer* bu
 	mCoreSyncProduceAudio(sync, buffer);
 }
 
-void mCoreSyncSetExternalPacing(struct mCoreSync* sync, bool external) {
+void mCoreSyncSetLockstep(struct mCoreSync* sync, bool active, bool external) {
     // Readers hold either the video or audio lock, so take both to publish.
     MutexLock(&sync->videoFrameMutex);
     MutexLock(&sync->audioBufferMutex);
     sync->externalPacing = external;
+    sync->lockstep = active;
     ConditionWake(&sync->videoFrameRequiredCond);
     ConditionWake(&sync->audioRequiredCond);
     MutexUnlock(&sync->audioBufferMutex);

@@ -48,13 +48,26 @@ eight-window Qt-audio check reduced follower publication blocking from 16.0 s
 to 4 ms over the run. With synchronous software rendering, throughput improved
 from 57.99 to 58.78 FPS but still underruns on this host. With the native render
 worker enabled it reached 59.99 FPS, one simulation update per video frame,
-zero dropped PCM and zero underruns on all eight outputs. These are one-minute
+zero dropped PCM and zero underruns on all eight outputs. That short check
+did not enable video synchronization. A later tiled, video-synchronized run
+exposed additional stalls. Displays now release their owned frame before any
+presentation sleep, and the ring reference uses its audio clock instead of
+adding a second OpenGL frame limiter. The audio regression uses a normal Qt
+event loop, so polling sleeps do not delay frame acknowledgements. The strict
+zero-underrun combined check remains required. A subsequent five-minute tiled
+run with both sync options enabled holds 60.00 FPS, one native update per
+frame and zero dropped source PCM on all consoles. Qt still reports
+`0/2/0/1/2/1/1/1` underruns: its refill timers paused for 113–137 ms while
+source PCM remained buffered. That Qt delivery failure remains open. The
+equivalent five-minute SDL run passes at 60.02 FPS with zero source losses
+and zero underrun samples on every output. The short comparisons are one-minute
 gameplay measurements with a private PulseAudio sink and Xvfb, not native
 Windows or physical-speaker validation. Extended combined checks remain open.
 Peer outputs use bounded resampling
 correction for independent audio-device clocks. Interpolation runs outside
 the producer mutex, and the existing threaded scanline renderer is enabled
-by default for ring sessions unless explicitly configured otherwise.
+by default for ring sessions on non-Windows platforms unless explicitly
+configured otherwise. See the Windows diagnostics below for its safe default.
 Qt Multimedia ring outputs create their sink, PCM source and timers on a
 dedicated audio worker for each window. Painting and settings dialogs do not
 service those sinks. Stop completes on the worker before releasing its core;

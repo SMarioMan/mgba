@@ -19,6 +19,7 @@
 #include <QFile>
 #include <QMenuBar>
 #include <QDir>
+#include <QEventLoop>
 #include <mgba/core/input.h>
 #include <mgba/gba/interface.h>
 #include <mgba/internal/gba/input.h>
@@ -634,7 +635,14 @@ private slots:
 		timer.start();
 		qint64 nextProgress = 30000;
 		while (!entered && timer.elapsed() < (qEnvironmentVariableIntValue("MGBA_RING_GUI_VISUAL") ? 1800000 : 600000)) {
-			QTest::qWait(audioCheck ? 250 : 20);
+            if (audioCheck) {
+                // qWait polls GUI events between sleeps. With video sync the
+                // reference producer waits for those polls, manufacturing
+                // stalls that do not occur in the application's event loop.
+                QEventLoop desktop;
+                QTimer::singleShot(250, &desktop, &QEventLoop::quit);
+                desktop.exec();
+            } else QTest::qWait(20);
             if (audioCheck) {
                 bool allRacing = true, allComplete = true;
                 unsigned required = 2 | (finishScene ? 4 : 0);
@@ -701,6 +709,8 @@ private slots:
 				QVERIFY(static_cast<GBA*>(core->board)->biosVf);
 				QVERIFY(!mCoreThreadHasExited(windows[i]->controller()->thread()));
                 QVERIFY(!mCoreThreadHasCrashed(windows[i]->controller()->thread()));
+                QCOMPARE(windows[i]->controller()->thread()->impl->sync.lockstep, ringTopology);
+                QCOMPARE(windows[i]->controller()->thread()->impl->sync.externalPacing, ringTopology && i != 0);
                 if (wireLoss) {
                     if (core->frameCounter(core) < 3600 || core->rawRead8(core, 0x03006BAD, -1)) {
                         entered = false;

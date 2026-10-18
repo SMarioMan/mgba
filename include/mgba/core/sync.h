@@ -30,6 +30,9 @@ struct mCoreSync {
 	bool deferWait;
 	/* A linked reference core supplies the host-time pacing for this peer. */
 	bool externalPacing;
+	/* Cores share a lockstep executor. Its reference audio output owns the
+	 * real-time clock; displays must not add an independent audio-time cap. */
+	bool lockstep;
 };
 
 struct mCoreOptions;
@@ -40,7 +43,7 @@ void mCoreSyncForceFrame(struct mCoreSync* sync);
 bool mCoreSyncWaitFrameStart(struct mCoreSync* sync);
 void mCoreSyncWaitFrameEnd(struct mCoreSync* sync);
 void mCoreSyncSetVideoSync(struct mCoreSync* sync, bool wait);
-void mCoreSyncSetExternalPacing(struct mCoreSync* sync, bool external);
+void mCoreSyncSetLockstep(struct mCoreSync* sync, bool active, bool external);
 
 struct mAudioBuffer;
 void mCoreSyncWaitDeferred(struct mCoreSync* sync, const struct mAudioBuffer*);

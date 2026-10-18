@@ -208,7 +208,7 @@ bool GBASIORingThreadAttach(struct GBASIORingThreadCoordinator* coordinator, str
 		node->thread = thread;
 		node->coordinator = coordinator;
 		coordinator->nodes[node->driver.slot] = node;
-        mCoreSyncSetExternalPacing(&thread->impl->sync, node->driver.slot != 0);
+        mCoreSyncSetLockstep(&thread->impl->sync, true, node->driver.slot != 0);
 		node->driver.timeOffset = _resetEpoch(coordinator) - mTimingGlobalTime(thread->core->timing);
 		node->quantum.context = node;
 		node->quantum.callback = _yield;
@@ -233,12 +233,12 @@ void GBASIORingThreadDetach(struct GBASIORingThreadNode* node) {
 	mTimingDeschedule(node->thread->core->timing, &node->quantum);
 	node->thread->runLoopOverride = NULL;
 	node->thread->resetOverride = NULL;
-    mCoreSyncSetExternalPacing(&node->thread->impl->sync, false);
+    mCoreSyncSetLockstep(&node->thread->impl->sync, false, false);
 	GBASIORingDetach(&node->driver);
 	for (unsigned i = slot; i < coordinator->ring.count; ++i) coordinator->nodes[i] = coordinator->nodes[i + 1];
 	coordinator->nodes[coordinator->ring.count] = NULL;
 	for (unsigned i = 0; i < coordinator->ring.count; ++i) {
-		mCoreSyncSetExternalPacing(&coordinator->nodes[i]->thread->impl->sync, i != 0);
+		mCoreSyncSetLockstep(&coordinator->nodes[i]->thread->impl->sync, true, i != 0);
 	}
 	mCoreThreadStopWaiting(node->thread);
 	struct GBASIORingThreadNode* next = _next(coordinator);

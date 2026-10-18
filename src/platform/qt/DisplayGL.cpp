@@ -871,11 +871,19 @@ void PainterGL::draw() {
 	// Ring peers follow the reference core's clock. Sleeping here while
 	// holding their video mutex can stall that shared executor and starve
 	// every audio output, even though this peer must not pace emulation.
-	int wantSwap = !sync->externalPacing && (sync->audioWait || sync->videoFrameWait);
+	// The ring's reference sink already regulates all core clocks. A second
+	// frame limiter loses time on every late presentation and drains its PCM
+	// reserve even when the emulation has ample processing headroom.
+	int wantSwap = !sync->externalPacing && !(sync->lockstep && sync->audioWait) &&
+	               (sync->audioWait || sync->videoFrameWait);
 	if (m_swapInterval != wantSwap) {
 		swapInterval(wantSwap);
 	}
 	dequeue();
+	// dequeue owns the displayed buffer independently of the core. Release
+	// the producer before waiting for presentation; a linked executor must
+	// keep generating every participant's PCM during this window's sleep.
+	mCoreSyncWaitFrameEnd(sync);
 	if (m_drawFrametimes) {
 		m_starttimes.append(m_delayTimer.elapsed());
 		if (m_starttimes.count() > MAX_FRAME_HISTORY) {
@@ -896,8 +904,6 @@ void PainterGL::draw() {
 			forceRedraw = m_delayTimer.nsecsElapsed() + OVERHEAD_NSEC >= 1000000000 / m_window->screen()->refreshRate();
 		}
 	}
-	mCoreSyncWaitFrameEnd(sync);
-
 	if (forceRedraw) {
 		qint64 frametime = m_delayTimer.restart();
 		if (m_drawFrametimes) {
