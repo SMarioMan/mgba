@@ -234,8 +234,11 @@ to `07c2af334491c6d0db84c63ff9f90c6c22d81ef9` (repaired-history ID
 same launch succeeds with `-C threadedVideo=0`. Other ring scheduling and audio
 improvements remain enabled. Other platforms retain automatic rendering workers.
 An explicit `-C threadedVideo=1` remains available for isolating the Windows
-worker defect. The worker's underlying Windows corruption and the performance
-of the synchronous fallback have not yet been validated as resolved.
+worker defect. A five-minute, eight-window OpenGL/SDL replay with the native
+worker disabled verifies that path on every console and holds 59.97 FPS with
+full simulation updates, zero PCM losses and zero underrun samples on Linux.
+Native Windows confirmation of the worker fix and fallback performance remains
+open.
 
 A sanitizer run with hardware rendering reproduced a separate unsafe handoff:
 rebuilding the active video proxy changed its backend while the old native

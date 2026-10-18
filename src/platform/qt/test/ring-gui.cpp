@@ -573,6 +573,16 @@ private slots:
                 auto gba = static_cast<GBA*>(controller->thread()->core->board);
                 QCOMPARE(gba->video.renderer->rendererId(gba->video.renderer), uint32_t(0x6E726C67));
             }
+            if (qEnvironmentVariableIsSet("MGBA_RING_GUI_THREADED") &&
+                qEnvironmentVariableIsSet("MGBA_RING_GUI_HARDWARE") &&
+                !qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE")) {
+                CoreController::Interrupter interrupter(controller);
+                // With software GBA rendering, the native worker owns the
+                // core's video logger. Verify the active path on every console,
+                // rather than merely checking the inherited setting.
+                QCOMPARE(controller->thread()->core->videoLogger != nullptr,
+                         qEnvironmentVariableIntValue("MGBA_RING_GUI_THREADED") != 0);
+            }
 			if (lateBoot && !i) {
 				controller->setPaused(false);
 				// The GUI counter briefly holds UINT64_MAX during reset. Wait for
