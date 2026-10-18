@@ -460,9 +460,11 @@ static void _GBACoreReloadConfigOption(struct mCore* core, const char* option, c
 #endif
 	if (strcmp("hwaccelVideo", option) == 0) {
 #ifndef MINIMAL_CORE
-		// Stop the old consumer before rebuilding its proxy in place. The
-		// logger and backend may both change during a Qt renderer handoff.
-		GBAVideoProxyRendererUnshim(&gba->video, &gbacore->proxyRenderer);
+		// Retire the old proxy on its consumer thread before rebuilding it
+		// in place. GL teardown must keep the old logger's context too.
+		if (gba->video.renderer == &gbacore->proxyRenderer.d) {
+			GBAVideoAssociateRenderer(&gba->video, &gbacore->dummyRenderer);
+		}
 #endif
 		struct GBAVideoRenderer* renderer = NULL;
 		if (gbacore->renderer.outputBuffer) {
@@ -742,7 +744,9 @@ static void _GBACoreReset(struct mCore* core) {
 	struct GBACore* gbacore = (struct GBACore*) core;
 	struct GBA* gba = (struct GBA*) core->board;
 #ifndef MINIMAL_CORE
-	GBAVideoProxyRendererUnshim(&gba->video, &gbacore->proxyRenderer);
+	if (gba->video.renderer == &gbacore->proxyRenderer.d) {
+		GBAVideoAssociateRenderer(&gba->video, &gbacore->dummyRenderer);
+	}
 #endif
 	bool value;
 	UNUSED(value);

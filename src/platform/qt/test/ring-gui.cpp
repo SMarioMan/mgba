@@ -27,6 +27,7 @@
 #include <QTemporaryDir>
 #include <QPointer>
 #include <QScreen>
+#include <QSignalSpy>
 #include <QTest>
 #include <atomic>
 #include <chrono>
@@ -312,6 +313,20 @@ private slots:
                     QCOMPARE(gba->video.renderer->rendererId(gba->video.renderer), uint32_t(0x6E726C67));
                 }
             }
+            if (qEnvironmentVariableIntValue("MGBA_RING_GUI_RESET_BACKENDS")) {
+                for (Window* window : app->windows()) {
+                    auto controller = window->controller();
+                    QSignalSpy reset(controller.get(), &CoreController::didReset);
+                    controller->reset();
+                    QTRY_VERIFY_WITH_TIMEOUT(!reset.isEmpty(), 10000);
+                    QTRY_VERIFY_WITH_TIMEOUT(controller->frameCounter() >= 60 && controller->frameCounter() < 100000, 30000);
+                    CoreController::Interrupter interrupter(controller.get());
+                    QVERIFY(!mCoreThreadHasCrashed(controller->thread()));
+                    auto gba = static_cast<GBA*>(controller->thread()->core->board);
+                    if (qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE"))
+                        QCOMPARE(gba->video.renderer->rendererId(gba->video.renderer), uint32_t(0x6E726C67));
+                }
+            }
             for (Window* window : app->windows()) window->close();
             QTRY_COMPARE_WITH_TIMEOUT(app->windows().size(), 0, 10000);
             QTRY_COMPARE_WITH_TIMEOUT(app->multiplayer()->attached(), 0, 10000);
@@ -520,6 +535,10 @@ private slots:
 			controller->thread()->core->addCoreCallbacks(controller->thread()->core, &callbacks);
 			window->setController(controller);
 			QTRY_VERIFY_WITH_TIMEOUT(controller->hasStarted(), 10000);
+#if defined(BUILD_GL) || defined(BUILD_GLES2) || defined(BUILD_GLES3) || defined(USE_EPOXY)
+            if (qEnvironmentVariableIntValue("MGBA_RING_GUI_DISPLAY") == 1)
+                QVERIFY2(window->findChild<DisplayGL*>(), "Requested OpenGL display was not created");
+#endif
             // The core starts before Window::gameStarted's queued signal.
             // Wait for its audio setup before topology changes can recreate
             // the output; otherwise the test retains a startup-era pointer.

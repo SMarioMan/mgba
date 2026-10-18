@@ -148,6 +148,9 @@ eight-window startup/closure check. Hardware checks wait for attachment and
 verify the active GBA renderer ID on every console, rather than just compiled
 support. `threadedVideoReset` separately exercises repeated software resets
 and renderer reloads using the supplied ROM and real BIOS.
+Set `MGBA_RING_GUI_RESET_BACKENDS=1` with the short startup replay to reset
+each of the eight consoles after its backend is active. Hardware checks
+require the GL renderer to remain active after every reset.
 
 For moving, host-clock audio validation, set `MGBA_RING_GUI_AUDIO=1` for
 eight SDL outputs or `MGBA_RING_GUI_AUDIO=qt` for the actual Qt Multimedia
@@ -214,3 +217,6 @@ memory was initialized. Renderer changes and resets now drain and stop the
 old consumer before reusing that proxy. Eight hardware-rendered windows and
 repeated software resets/reloads pass ASan/UBSan on Linux. Native Windows
 validation is still required before re-enabling its worker default.
+The old backend is retired through its logger before proxy replacement, so
+hardware teardown executes on the thread owning its GL context. Resetting
+all eight active hardware backends also passes the sanitizer replay.
