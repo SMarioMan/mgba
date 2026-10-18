@@ -76,14 +76,25 @@ static uint16_t _ring_write(struct GBASIODriver* d, uint16_t value) {
 		++ring->collisions;
 		return GBASIONormalClearStart(value);
 	}
-	uint32_t outgoing[GBA_RING_MAX_NODES];
-	bool receiving[GBA_RING_MAX_NODES];
+	uint32_t outgoing[GBA_RING_MAX_PLAYERS];
+	bool receiving[GBA_RING_MAX_PLAYERS];
 	for (unsigned i = 0; i < ring->count; ++i) {
 		struct GBASIO* sio = ring->players[i]->d.p;
 		receiving[i] = sio->mode == d->p->mode && (i == p->slot || GBASIONormalIsStart(sio->siocnt));
 		if (!receiving[i]) {
 			outgoing[i] = ring->players[i]->idleSo ? UINT32_MAX : 0;
 			++ring->missedReceivers;
+            if (ring->captureMisses && ring->missSampleCount < GBA_RING_MISS_SAMPLES) {
+                struct GBA* gba = sio->p;
+                struct GBASIORingMiss* sample = &ring->missSamples[ring->missSampleCount++];
+                *sample = (struct GBASIORingMiss) {
+                    .slot = i, .frame = gba->video.frameCounter,
+                    .pc = gba->cpu->gprs[ARM_PC], .lr = gba->cpu->gprs[ARM_LR],
+                    .cpsr = gba->cpu->cpsr.packed, .vcount = gba->video.vcount,
+                    .ime = gba->memory.io[GBA_REG(IME)], .ie = gba->memory.io[GBA_REG(IE)],
+                    .irq = gba->memory.io[GBA_REG(IF)], .dma = gba->memory.activeDMA
+                };
+            }
 		} else if (d->p->mode == GBA_SIO_NORMAL_32) {
 			outgoing[i] = sio->p->memory.io[GBA_REG(SIODATA32_LO)] | ((uint32_t) sio->p->memory.io[GBA_REG(SIODATA32_HI)] << 16);
 		} else {
@@ -146,7 +157,7 @@ void GBASIORingInit(struct GBASIORing* ring) {
 }
 
 bool GBASIORingAttach(struct GBASIORing* ring, struct GBASIORingDriver* p) {
-	if (ring->count == GBA_RING_MAX_NODES || ring->pending) {
+	if (ring->count == GBA_RING_MAX_PLAYERS || ring->pending) {
 		return false;
 	}
 	for (unsigned i = 0; i < ring->count; ++i) {

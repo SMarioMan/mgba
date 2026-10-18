@@ -4,6 +4,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "ConfigController.h"
+#include <mgba/internal/gba/sio/ring.h>
 #include "moc_ConfigController.cpp"
 
 #include "ActionMapper.h"
@@ -22,7 +23,6 @@
 static const mOption s_frontendOptions[] = {
 	{ "ecard", true, '\0' },
 	{ "ring-players", true, '\0' },
-	{ "ring-map-rom", true, '\0' },
 	{ "instance-settings", true, '\0' },
 	{ "hide-menu", false, '\0' },
 	{ "mb", true, '\0' },
@@ -169,9 +169,8 @@ ConfigController::ConfigController(QObject* parent, const QString& directory)
 	mSubParserGraphicsInit(&m_subparsers[0], &m_graphicsOpts);
 
 	m_subparsers[1].usage = "Frontend options:\n"
-	      "  --ring-players N  Open 2..8 ring windows running the one supplied ROM\n"
-	      "  --ring-map-rom FILE  Append a dedicated map-display ROM to that ring\n"
-	      "  --instance-settings DIR  Save independent P1..P8 configurations in DIR\n"
+	      "  --ring-players N  Open 2..16 ring windows running the one supplied ROM\n"
+	      "  --instance-settings DIR  Save independent P1..P16 configurations in DIR\n"
 	      "  --hide-menu    Hide window menu bars (Alt shows them temporarily)\n"
 	      "  --ecard FILE   Scan an e-Reader card in the first loaded game\n"
 	      "                 Can be passed multiple times for multiple cards\n"
@@ -188,15 +187,11 @@ ConfigController::ConfigController(QObject* parent, const QString& directory)
 		if (optionName == QLatin1String("ring-players")) {
 			bool ok;
 			int count = QString::fromUtf8(arg).toInt(&ok);
-			if (!ok || count < 2 || count > 8) { self->m_argvOptions[optionName] = 0; return false; }
+			if (!ok || count < 2 || count > GBA_RING_MAX_PLAYERS) { self->m_argvOptions[optionName] = 0; return false; }
 			self->m_argvOptions[optionName] = count;
 			return true;
 		}
 		if (optionName == QLatin1String("instance-settings")) {
-			self->m_argvOptions[optionName] = QString::fromUtf8(arg);
-			return !self->m_argvOptions[optionName].toString().isEmpty();
-		}
-		if (optionName == QLatin1String("ring-map-rom")) {
 			self->m_argvOptions[optionName] = QString::fromUtf8(arg);
 			return !self->m_argvOptions[optionName].toString().isEmpty();
 		}
@@ -260,11 +255,7 @@ bool ConfigController::parseArguments(int argc, char* argv[]) {
 	}
 
 	if (mArgumentsParse(&m_args, argc, argv, m_subparsers.data(), m_subparsers.size())) {
-		if (m_argvOptions.contains("ring-map-rom") && !m_argvOptions.contains("ring-players") && !m_args.showHelp && !m_args.showVersion) {
-			mArgumentsDeinit(&m_args);
-			return false;
-		}
-		if (m_argvOptions.contains("ring-players") && (m_argvOptions["ring-players"].toInt() < 2 || m_argvOptions["ring-players"].toInt() > 8 || !m_args.fname || !m_fnames.isEmpty()) && !m_args.showHelp && !m_args.showVersion) {
+		if (m_argvOptions.contains("ring-players") && (m_argvOptions["ring-players"].toInt() < 2 || m_argvOptions["ring-players"].toInt() > GBA_RING_MAX_PLAYERS || !m_args.fname || !m_fnames.isEmpty()) && !m_args.showHelp && !m_args.showVersion) {
 			mArgumentsDeinit(&m_args);
 			return false;
 		}

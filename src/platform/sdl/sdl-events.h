@@ -11,6 +11,7 @@
 CXX_GUARD_START
 
 #include <mgba/core/interface.h>
+#include <mgba/internal/gba/sio/ring.h>
 #include <mgba/core/log.h>
 #include <mgba-util/circle-buffer.h>
 #include <mgba-util/vector.h>
@@ -22,7 +23,7 @@ mLOG_DECLARE_CATEGORY(SDL_EVENTS);
 #define SDL_BINDING_CONTROLLER 0x53444C43U
 
 /* Local controller capacity, independent of GBA hardware link slots. */
-#define MAX_PLAYERS 8
+#define MAX_PLAYERS GBA_RING_MAX_PLAYERS
 
 struct Configuration;
 

@@ -47,7 +47,7 @@ public:
 	bool ringTopology() const { return m_ringTopology; }
 	int maxPlayers() const {
 #ifdef M_CORE_GBA
-        if (m_ringTopology) return GBA_RING_MAX_NODES;
+        if (m_ringTopology) return GBA_RING_MAX_PLAYERS;
 #endif
         return 4;
     }

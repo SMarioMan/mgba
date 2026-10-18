@@ -435,15 +435,12 @@ void GBAApp::initMultiplayer() {
 		QString rom = fnames.first();
 		fnames.clear();
 		for (int i = 0; i < ringPlayers; ++i) fnames.append(rom);
-		QString mapRom = m_configController->getArgvOption("ring-map-rom").toString();
-		if (!mapRom.isEmpty()) fnames.append(mapRom);
 	}
 	if (fnames.count() < 2) {
 		return;
 	}
 
 	Window* w = m_windows[0];
-	int slot = 0;
 	for (const auto& fname : fnames) {
 		if (!w) {
 			w = newWindow();
@@ -452,13 +449,11 @@ void GBAApp::initMultiplayer() {
 			break;
 		}
 		if (ringPlayers) w->argumentsPassed(false);
-		w->setProperty("ringMapDisplay", ringPlayers && slot == ringPlayers);
 		m_manager.setConfig(w->config()->config());
 		CoreController* core = m_manager.loadGame(fname);
 		m_manager.setConfig(m_configController->config());
 		w->setController(core);
 		w = nullptr;
-		++slot;
 	}
 }
 

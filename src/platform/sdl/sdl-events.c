@@ -237,6 +237,7 @@ bool mSDLAttachPlayer(struct mSDLEvents* events, struct mSDLPlayer* player, int 
 				break;
 			}
 		}
+		if (playerId < 0) return false;
 	} else if (playerId >= MAX_PLAYERS || events->players[playerId]) {
 		return false;
 	}

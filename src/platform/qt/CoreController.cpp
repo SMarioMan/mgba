@@ -491,6 +491,10 @@ void CoreController::start() {
 
 void CoreController::stop() {
 	setSync(false);
+	// Disconnect while peers can still acknowledge interruption. Deferring
+	// every detach to concurrent clean callbacks can leave shutdown waiting
+	// for a participant whose owning thread has already returned.
+	clearMultiplayerController();
 #ifdef ENABLE_DEBUGGERS
 	if (m_malController) {
 		m_malController->stop();

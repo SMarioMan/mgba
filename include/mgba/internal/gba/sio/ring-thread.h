@@ -23,7 +23,7 @@ struct GBASIORingThreadNode {
  * Attach/detach require all existing cores to be interrupted by the caller. */
 struct GBASIORingThreadCoordinator {
 	struct GBASIORing ring;
-	struct GBASIORingThreadNode* nodes[GBA_RING_MAX_NODES];
+	struct GBASIORingThreadNode* nodes[GBA_RING_MAX_PLAYERS];
 	Mutex mutex;
 	int64_t clock;
 	unsigned interval;

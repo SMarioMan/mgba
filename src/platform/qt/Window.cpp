@@ -1314,8 +1314,7 @@ void Window::updateTitle(float fps) {
 		setWindowTitle(tr("%1 - %2 (%3 fps) - %4").arg(projectName).arg(title).arg(fps).arg(projectVersion));
 	}
 	if (GBAApp::app()->multiplayer()->ringTopology())
-		setWindowTitle(windowTitle() + (property("ringMapDisplay").toBool()
-            ? tr(" - Map") : QString(" - P%1").arg(m_playerId + 1)));
+		setWindowTitle(windowTitle() + QString(" - P%1").arg(m_playerId + 1));
 }
 
 void Window::openStateWindow(LoadSave ls) {
@@ -1501,7 +1500,7 @@ void Window::setupMenu(QMenuBar* menubar) {
 	m_multiWindow = m_actions.addAction(tr("New multiplayer window"), "multiWindow", GBAApp::app(), &GBAApp::newWindow, "file");
 	m_actions.addAction(tr("GBA link topology..."), "gbaLinkTopology", [this]() {
 		MultiplayerController* multiplayer = GBAApp::app()->multiplayer();
-		const QStringList topologies{tr("Standard link (up to 4 players)"), tr("Ring link (up to 8 players)")};
+		const QStringList topologies{tr("Standard link (up to 4 players)"), tr("Ring link (up to 16 players)")};
 		bool accepted = false;
 		QString selected = QInputDialog::getItem(this, tr("GBA link topology"), tr("Connect multiplayer windows using:"), topologies, multiplayer->ringTopology() ? 1 : 0, false, &accepted);
 		if (!accepted) return;

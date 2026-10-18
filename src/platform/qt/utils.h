@@ -21,11 +21,12 @@
 struct VDir;
 struct VDirEntry;
 
+#include <mgba/internal/gba/sio/ring.h>
+
 namespace QGBA {
 
 // Frontend windows/controllers; hardware multiplayer slots remain MAX_GBAS.
-// Eight racers plus one optional ring map-display window.
-constexpr int MAX_LOCAL_PLAYERS = 9;
+constexpr int MAX_LOCAL_PLAYERS = GBA_RING_MAX_PLAYERS;
 
 enum class Endian {
 	NONE    = 0b00,

@@ -6,7 +6,7 @@ its executable is `/workspace/.setup/mgba-qt/qt/mgba-qt`.
 Source `/workspace/.setup/activate.sh` before running it there.
 
 1. Configure the GBA BIOS in Settings, enable its use, and keep BIOS boot enabled.
-2. Choose **File → GBA link topology... → Ring link (up to 8 players)**.
+2. Choose **File → GBA link topology... → Ring link (up to 16 players)**.
 3. Use **New multiplayer window** for each additional console and load
    `mksc-ring.gba` in every window. Configure each window's input bindings.
 4. Select **Ring Link** in each game's link submenu. Once everyone is connected,
@@ -15,12 +15,12 @@ Source `/workspace/.setup/activate.sh` before running it there.
 The topology is shared by all local windows and saved in the Qt configuration.
 Standard GBA multiplayer retains its four-console limit. Switching a loaded
 session's topology reconnects its emulated cables; do it before joining a game.
-Switching eight open windows back to standard requires closing the extras.
+Switching more than four open windows back to standard requires closing the extras.
 Game Boy cores cannot join a GBA ring.
 
 Ring Pause pauses/resumes the group. Reset and closing a participant cancel
 pending transfers; the game can report the lost connection and return to its
-connection flow. Keyboard/SDL input slots and per-player save IDs support eight
+connection flow. Keyboard/SDL input slots and per-player save IDs support sixteen
 windows. This feature does not add network play or connected-session savestates.
 
 ## Scheduling and validation
@@ -193,22 +193,45 @@ These diagnostics are disabled by default. Queued PCM at an underrun separates
 late sink feeding from an empty emulation FIFO; host scheduling must also be
 measured before attributing a long callback to emulator CPU work.
 
-## Extra ring map window
+## Sixteen-console ring
 
-`--ring-players N --ring-map-rom map.gba racers.gba` starts N human windows
-(2–8), then a dedicated map window. This requires a game implementing the
-map-only role; the MKSC checkout provides `build.py --map-display`. Match all
-other ROM options between the racer and map images. The extra node does not
-increase the human-player limit. Its caption ends in `Map`, and its settings
-use the next instance directory (P9 for eight humans). Stock GBA multiplayer
-still has its ordinary four-console limit.
+`--ring-players N game.gba` starts 2–16 consoles running the same ROM.
+The cable implementation treats every console alike. It does not interpret
+player roles, game packets, or map displays. Captions end in P1 through P16,
+and `--instance-settings DIR` gives each console its own numbered directory.
+Standard GBA multiplayer still has its ordinary four-console limit.
 
-For the real-BIOS GUI regression, set `MGBA_RING_GUI_MAP_ROM` to the matching
-direct-boot map ROM alongside `MGBA_RING_GUI_BOOT_ROM`, `MGBA_RING_GUI_BIOS`
-and `MGBA_RING_GUI_INPUTS`, then run `test-qt-ring_gui scriptedLaunch`. It
-checks nine-window startup, the map role, silent audio, separate settings,
-menu-bar access, and closing/replacing a linked window. The CLI link runner
-also accepts `--ring-map-rom` alongside `--ring --players N --rom racers.gba`.
+MKSC implements its roles inside the standard ring ROM: the first eight
+consoles are racers; consoles 9–16 automatically show the full-course map.
+No separate map image or emulator option is needed. The console that presses
+Start anchors the game's discovery order.
+
+The sixteen-console BIOS-backed launch and real gameplay checks pass with
+independent settings and numbered captions. Wire regressions cover every
+count from 2 through 16 in both normal serial modes, including the highest
+open-input bit and rejection of a seventeenth attachment. ASan/UBSan checks
+also pass all sixteen hardware renderers through 600-frame startup, batched
+resets and closure. Resets are queued before waiting for their shared
+post-reset frame window, keeping the test work linear in the console count.
+The Windows build retains its safe rendering-worker default; native Windows
+and physical cable behavior remain unverified here.
+
+The real-BIOS GUI fixture accepts `MGBA_RING_GUI_PLAYERS=2..16` (default 8),
+plus `MGBA_RING_GUI_BOOT_ROM`, `MGBA_RING_GUI_BIOS`, and
+`MGBA_RING_GUI_INPUTS`. `test-qt-ring_gui scriptedLaunch` checks one-ROM
+startup, numbered captions, separate settings, temporary Alt menu access,
+closing/replacing a window, native simulation speed, and the game's map roles
+when more than eight consoles are requested. These role assertions belong
+to the game regression, not the emulator's cable.
+
+## Missed-receiver diagnostics
+
+`mgba-link --ring-missed-from FRAME` enables a bounded capture of the first
+128 unarmed receiver events after that video frame. Final JSON includes
+`missedSamples` with the console index, PC/LR/CPSR, scanline, interrupt
+registers and DMA state. Capturing is off by default and does not change
+emulated cable timing. These samples help distinguish blocked interrupt
+service from emulation or host audio stalls.
 
 ## Instruction profiles
 

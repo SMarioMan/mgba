@@ -11,6 +11,9 @@
 #include "platform/qt/Window.h"
 #include "platform/qt/DisplayGL.h"
 #include "platform/qt/LogController.h"
+#ifdef BUILD_SDL
+#include "platform/sdl/sdl-events.h"
+#endif
 #include <mgba/internal/gba/gba.h>
 #include <mgba/internal/gba/sio/ring.h>
 #include <mgba/feature/thread-proxy.h>
@@ -124,7 +127,7 @@ struct Inputs {
 
 class RingGuiTest : public QObject {
 Q_OBJECT
-    Inputs inputs[GBA_RING_MAX_NODES];
+    Inputs inputs[GBA_RING_MAX_PLAYERS];
 private slots:
     void workerLogDelivery() {
         LogController logger(mLOG_WARN);
@@ -222,18 +225,39 @@ private slots:
             argv[count] = nullptr;
         }
     }
-    void mapArguments() {
+    void controllerSlots() {
+#ifdef BUILD_SDL
+        mSDLEvents events{};
+        mSDLPlayer players[GBA_RING_MAX_PLAYERS]{}, extra{};
+        for (int i = 0; i < GBA_RING_MAX_PLAYERS; ++i) {
+            QVERIFY(mSDLAttachPlayer(&events, &players[i], -1));
+            QCOMPARE(players[i].playerId, i);
+            QCOMPARE(events.players[i], &players[i]);
+        }
+        QVERIFY(!mSDLAttachPlayer(&events, &extra, -1));
+        QVERIFY(!mSDLAttachPlayer(&events, &extra, GBA_RING_MAX_PLAYERS));
+        QVERIFY(!mSDLAttachPlayer(&events, &extra, 7));
+        mSDLDetachPlayer(&events, &players[9]);
+        QVERIFY(mSDLAttachPlayer(&events, &extra, -1));
+        QCOMPARE(extra.playerId, 9);
+        mSDLDetachPlayer(&events, &extra);
+        for (int i = 0; i < GBA_RING_MAX_PLAYERS; ++i)
+            if (i != 9) mSDLDetachPlayer(&events, &players[i]);
+#endif
+    }
+    void ringArguments() {
         QTemporaryDir settings;
-        {
+        for (int count : {2, 8, 9, 16}) {
             ConfigController parsed(nullptr, settings.path());
-            CommandLineArguments arguments({"mGBA", "--ring-players", "8", "--ring-map-rom", "map.gba", "race.gba"});
-            QVERIFY(parsed.parseArguments(6, arguments.data()));
-            QCOMPARE(parsed.getArgvOption("ring-players").toInt(), 8);
-            QCOMPARE(parsed.getArgvOption("ring-map-rom").toString(), QString("map.gba"));
+            CommandLineArguments arguments({"mGBA", "--ring-players", QString::number(count), "race.gba"});
+            QVERIFY(parsed.parseArguments(4, arguments.data()));
+            QCOMPARE(parsed.getArgvOption("ring-players").toInt(), count);
         }
         for (const QStringList& values : {
-                QStringList{"mGBA", "--ring-map-rom", "map.gba", "race.gba"},
-                QStringList{"mGBA", "--ring-players", "9", "--ring-map-rom", "map.gba", "race.gba"}}) {
+                QStringList{"mGBA", "--ring-players", "1", "race.gba"},
+                QStringList{"mGBA", "--ring-players", "17", "race.gba"},
+                QStringList{"mGBA", "--ring-players", "8"},
+                QStringList{"mGBA", "--ring-map-rom", "map.gba", "race.gba"}}) {
             ConfigController parsed(nullptr, settings.path());
             CommandLineArguments arguments(values);
             QVERIFY(!parsed.parseArguments(values.size(), arguments.data()));
@@ -318,11 +342,11 @@ private slots:
         QString rom = qEnvironmentVariable("MGBA_RING_GUI_BOOT_ROM");
         if (rom.isEmpty()) QSKIP("Set MGBA_RING_GUI_BOOT_ROM to a --boot-ring ROM");
         QByteArray bios = qEnvironmentVariable("MGBA_RING_GUI_BIOS").toUtf8();
-        QString mapRom = qEnvironmentVariable("MGBA_RING_GUI_MAP_ROM");
-        int launched = mapRom.isEmpty() ? 8 : 9;
-        QStringList values{"mGBA", "--ring-players", "8", "--instance-settings", settings.path(),
+        int launched = qEnvironmentVariableIntValue("MGBA_RING_GUI_PLAYERS");
+        if (!launched) launched = 8;
+        QVERIFY(launched >= 2 && launched <= GBA_RING_MAX_PLAYERS);
+        QStringList values{"mGBA", "--ring-players", QString::number(launched), "--instance-settings", settings.path(),
                            "--hide-menu", "--bios", QString::fromUtf8(bios)};
-        if (!mapRom.isEmpty()) values << "--ring-map-rom" << mapRom;
         values << rom;
         CommandLineArguments arguments(values);
         config->setOption("gba.bios", "");
@@ -331,7 +355,7 @@ private slots:
         QVERIFY(app->newWindow());
         app->initMultiplayer();
         QCOMPARE(app->windows().size(), launched);
-        if (launched == GBA_RING_MAX_NODES) QVERIFY(!app->newWindow());
+        if (launched == GBA_RING_MAX_PLAYERS) QVERIFY(!app->newWindow());
         // A short startup replay isolates backend initialization from ROM menu
         // input. The ordinary full gameplay/settings regression stays intact.
         int startupFrames = qEnvironmentVariableIntValue("MGBA_RING_GUI_STARTUP_FRAMES");
@@ -343,13 +367,16 @@ private slots:
                 if (qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE"))
                     QVERIFY2(controller->supportsFeature(CoreController::Feature::OPENGL), "Hardware GBA renderer is disabled in this build");
                 QTRY_VERIFY_WITH_TIMEOUT(controller->hasStarted(), 10000);
-                QTRY_VERIFY_WITH_TIMEOUT(controller->frameCounter() >= uint64_t(startupFrames), 120000);
+                // Debug/sanitized sixteen-console hardware rendering doubles the
+                // startup workload; retain the same per-console wall budget.
+                QTRY_VERIFY_WITH_TIMEOUT(controller->frameCounter() >= uint64_t(startupFrames), 120000 * qMax(8, launched) / 8);
                 if (qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE"))
                     QTRY_VERIFY_WITH_TIMEOUT(controller->hardwareAccelerated(), 10000);
                 QVERIFY(!mCoreThreadHasCrashed(controller->thread()));
                 CoreController::Interrupter interrupter(controller.get());
                 auto gba = static_cast<GBA*>(controller->thread()->core->board);
                 QVERIFY(gba->biosVf);
+                qInfo("Startup console reached %u frames", unsigned(controller->frameCounter()));
                 if (qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE")) {
                     QVERIFY(controller->hardwareAccelerated());
                     // OPENGL_MAGIC from the actual GBA renderer, rather than
@@ -358,25 +385,39 @@ private slots:
                 }
             }
             if (qEnvironmentVariableIntValue("MGBA_RING_GUI_RESET_BACKENDS")) {
+                // Reset every board before observing the post-reset window.
+                // Waiting sixty group frames separately for each board would
+                // emulate N*N*60 frames instead of N*60 in a linked group.
+                std::vector<std::unique_ptr<QSignalSpy>> resetSignals;
                 for (Window* window : app->windows()) {
                     auto controller = window->controller();
-                    QSignalSpy reset(controller.get(), &CoreController::didReset);
+                    resetSignals.emplace_back(new QSignalSpy(controller.get(), &CoreController::didReset));
                     controller->reset();
-                    QTRY_VERIFY_WITH_TIMEOUT(!reset.isEmpty(), 10000);
-                    QTRY_VERIFY_WITH_TIMEOUT(controller->frameCounter() >= 60 && controller->frameCounter() < 100000, 30000);
+                }
+                int resetIndex = 0;
+                for (Window* window : app->windows()) {
+                    auto controller = window->controller();
+                    QTRY_VERIFY_WITH_TIMEOUT(!resetSignals[resetIndex]->isEmpty(), 10000);
+                    QTRY_VERIFY_WITH_TIMEOUT(controller->frameCounter() >= 60 && controller->frameCounter() < 100000,
+                                             30000 * qMax(8, launched) * qMax(8, launched) / 64);
                     CoreController::Interrupter interrupter(controller.get());
                     QVERIFY(!mCoreThreadHasCrashed(controller->thread()));
                     auto gba = static_cast<GBA*>(controller->thread()->core->board);
                     if (qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE"))
                         QCOMPARE(gba->video.renderer->rendererId(gba->video.renderer), uint32_t(0x6E726C67));
+                    qInfo("Reset console kept its active renderer");
+                    ++resetIndex;
                 }
             }
-            for (Window* window : app->windows()) window->close();
+            for (Window* window : app->windows()) {
+                qInfo("Closing startup console");
+                window->close();
+            }
             QTRY_COMPARE_WITH_TIMEOUT(app->windows().size(), 0, 10000);
             QTRY_COMPARE_WITH_TIMEOUT(app->multiplayer()->attached(), 0, 10000);
             return;
         }
-        QFile fixture(qEnvironmentVariable("MGBA_RING_GUI_INPUTS") + "/vs-8.csv");
+        QFile fixture(qEnvironmentVariable("MGBA_RING_GUI_INPUTS") + QString("/vs-%1.csv").arg(qMin(launched, 8)));
         QVERIFY(fixture.open(QIODevice::ReadOnly));
         for (Inputs& input : inputs) input = {};
         while (!fixture.atEnd()) {
@@ -397,7 +438,7 @@ private slots:
             if (qEnvironmentVariableIntValue("MGBA_RING_GUI_DISPLAY") == 1)
                 QVERIFY2(window->findChild<DisplayGL*>(), "Requested OpenGL display was not created");
 #endif
-            QTRY_VERIFY2_WITH_TIMEOUT(window->windowTitle().endsWith(i == 8 ? QString(" - Map") : QString(" - P%1").arg(i+1)), qPrintable(window->windowTitle()), 10000);
+            QTRY_VERIFY2_WITH_TIMEOUT(window->windowTitle().endsWith(QString(" - P%1").arg(i+1)), qPrintable(window->windowTitle()), 10000);
             QVERIFY(!window->menuBar()->isVisible());
             inputs[i].controller = controller.get();
             inputs[i].measureSpeed = true;
@@ -429,10 +470,10 @@ private slots:
             CoreController::Interrupter interrupter(controller.get());
             auto core = controller->thread()->core;
             QVERIFY(static_cast<GBA*>(core->board)->biosVf);
-            QCOMPARE(core->rawRead8(core, 0x0300361B, -1), 8U);
+            QCOMPARE(core->rawRead8(core, 0x0300361B, -1), unsigned(qMin(launched, 8)));
             QCOMPARE(core->rawRead32(core, 0x03006B98, -1), 0U);
             QCOMPARE(core->rawRead32(core, 0x03006B9C, -1), 0U);
-            if (i == 8) {
+            if (i >= 8) {
                 QCOMPARE(core->rawRead16(core, 0x04000000, -1), 0x1441U);
                 for (unsigned channel = 0; channel < 11; ++channel)
                     QCOMPARE(core->rawRead32(core, 0x0203ED00 + channel * 4, -1), 0U);
@@ -534,7 +575,7 @@ private slots:
 		});
 		topology->trigger();
 		QCOMPARE(app->multiplayer()->ringTopology(), ringTopology);
-		QCOMPARE(app->multiplayer()->maxPlayers(), ringTopology ? GBA_RING_MAX_NODES : 4);
+		QCOMPARE(app->multiplayer()->maxPlayers(), ringTopology ? GBA_RING_MAX_PLAYERS : 4);
 		if (!ringTopology && qEnvironmentVariableIsEmpty("MGBA_RING_GUI_STOCK_INPUTS")) QSKIP("Set MGBA_RING_GUI_STOCK_INPUTS to the stock input fixtures directory");
         QString fixturePath = qEnvironmentVariable("MGBA_RING_GUI_REPLAY");
         if (fixturePath.isEmpty()) fixturePath = ringTopology ? qEnvironmentVariable("MGBA_RING_GUI_INPUTS") + QString("/%1-%2.csv").arg(mode).arg(players)

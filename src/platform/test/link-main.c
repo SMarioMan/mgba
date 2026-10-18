@@ -338,14 +338,14 @@ struct Route {
  * host happens to return from runLoop. This also matches the Qt test adapter. */
 static struct {
     const struct Input* events;
-    size_t count, next[GBA_RING_MAX_NODES];
-    struct Route routes[GBA_RING_MAX_NODES];
+    size_t count, next[GBA_RING_MAX_PLAYERS];
+    struct Route routes[GBA_RING_MAX_PLAYERS];
     unsigned driveFrom, driveMask, firePeriod, fireSpread;
     uint32_t barrierState, confirmScene, releaseScene, watch, watchValue, watchMask;
     bool autofire, untilWatch, recording, recordingError;
     struct Input* recordedInputs;
     size_t recordedCount, recordedCapacity;
-    unsigned recordedKeys[GBA_RING_MAX_NODES];
+    unsigned recordedKeys[GBA_RING_MAX_PLAYERS];
 } playback;
 
 /* A test driver sends only keypad input. It observes the native checkpoint
@@ -516,7 +516,6 @@ int main(int argc, char** argv) {
 	mLogSetDefaultLogger(&logger);
 	const char *rom = NULL, *bios = NULL, *inputPath = NULL, *prefix = NULL, *tracePath = NULL, *videoPath = NULL;
 	const char* profilePath = NULL;
-	const char* mapRom = NULL;
     const char* audioPrefix = NULL;
 	const char* progressPath = NULL;
 	unsigned players = 0, frames = 600;
@@ -525,6 +524,7 @@ int main(int argc, char** argv) {
     bool untilWatch = false;
 	uint32_t traceAddress = 0;
 	unsigned tracePlayer = 0;
+    unsigned missedFromFrame = UINT_MAX;
 	unsigned traceFromFrame = 0, traceStopFrame = UINT_MAX, profileUntil = UINT_MAX, profileFrom = UINT_MAX;
 	uint32_t dumpAddress = 0, keysAddress = 0x03004F30;
 	uint32_t barrierState = 0, untilScene = 0, autoConfirmScene = 0, releaseScene = 0;
@@ -546,7 +546,6 @@ int main(int argc, char** argv) {
 		const char* value = argv[i];
 		unsigned long n;
 		if (!strcmp(option, "--rom")) rom = value;
-		else if (!strcmp(option, "--ring-map-rom")) mapRom = value;
 		else if (!strcmp(option, "--bios")) bios = value;
 		else if (!strcmp(option, "--input")) inputPath = value;
 		else if (!strcmp(option, "--screens")) prefix = value;
@@ -561,7 +560,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(option, "--audio-state") && number(value, &n) && n >= 0x02000000 && n < 0x03008000) audioState = n;
 		else if (!strcmp(option, "--video-from") && number(value, &n) && n <= 100000) videoFrom = n;
 		else if (!strcmp(option, "--trace-file")) tracePath = value;
-		else if (!strcmp(option, "--trace-player") && number(value, &n) && n < GBA_RING_MAX_NODES) tracePlayer = n;
+		else if (!strcmp(option, "--trace-player") && number(value, &n) && n < GBA_RING_MAX_PLAYERS) tracePlayer = n;
+		else if (!strcmp(option, "--ring-missed-from") && number(value, &n) && n <= 100000) missedFromFrame = n;
 		else if (!strcmp(option, "--trace-from-frame") && number(value, &n) && n <= 100000) traceFromFrame = n;
 		else if (!strcmp(option, "--trace-stop-frame") && number(value, &n) && n <= 100000) traceStopFrame = n;
 		else if (!strcmp(option, "--release-inputs-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) releaseScene = n;
@@ -574,7 +574,7 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--dump") && number(value, &n) && n < UINT32_MAX - 128) dumpAddress = n;
 		else if (!strcmp(option, "--keys-address") && number(value, &n) && n < UINT32_MAX - 16) keysAddress = n;
 		else if (!strcmp(option, "--key-slots") && number(value, &n) && n > 0 && n <= 8) keySlots = n;
-		else if (!strcmp(option, "--players") && number(value, &n) && n <= 8) players = n;
+		else if (!strcmp(option, "--players") && number(value, &n) && n <= GBA_RING_MAX_PLAYERS) players = n;
 		else if (!strcmp(option, "--debug-step-frame") && number(value, &n) && n < UINT_MAX) debugStepFrame = n;
 		else if (!strcmp(option, "--ring-quantum") && number(value, &n) && n >= 64 && n <= 16384) ringQuantum = n;
         else if (!strcmp(option, "--autofire-period") && number(value, &n) && n >= 10 && n <= 600) firePeriod = n;
@@ -586,17 +586,15 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--until-watch-value") && number(value, &n) && n <= UINT32_MAX) { untilWatchValue = n; untilWatch = true; }
         else if (!strcmp(option, "--until-watch-mask") && number(value, &n) && n <= UINT32_MAX) untilWatchMask = n;
 		else if (!strcmp(option, "--watch") && number(value, &n) && n <= UINT32_MAX) watch = n;
-		else if (!strcmp(option, "--expect-host") && number(value, &n) && n < 8) expectHost = n;
+		else if (!strcmp(option, "--expect-host") && number(value, &n) && n < GBA_RING_MAX_PLAYERS) expectHost = n;
 		else if (!strcmp(option, "--break-frame") && number(value, &n) && n < UINT_MAX) breakFrame = n;
 		else if (!strcmp(option, "--restore-frame") && number(value, &n) && n < UINT_MAX) restoreFrame = n;
 		else { fprintf(stderr, "Invalid option: %s %s\n", option, value); return 2; }
 	}
-	if (!rom || (!hle && !bios) || (hle && bios) || players < 1U || players > (ringMode ? GBA_RING_MAX_PLAYERS : 4U) || (mapRom && (!ringMode || players < 2 || expectPoc)) || !frames || expectHost >= players || tracePlayer >= players + !!mapRom || (traceStopFrame != UINT_MAX && !tracePath) || (traceFromFrame && (!tracePath || !traceAddress || traceFromFrame > frames || traceFromFrame > traceStopFrame)) || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (settleFrames && !untilScene) || (barrierState && !ringMode) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
-		fprintf(stderr, "Usage: mgba-link --rom FILE (--bios FILE | --hle) --players 1..4 [--ring (1..8 racers)] [--ring-map-rom FILE (adds one display)] [--frames N] [--input CSV] [--screens PREFIX] [--watch ADDRESS] [--expect-poc]\n");
+	if (!rom || (!hle && !bios) || (hle && bios) || players < 1U || players > (ringMode ? GBA_RING_MAX_PLAYERS : 4U) || !frames || expectHost >= players || tracePlayer >= players || (traceStopFrame != UINT_MAX && !tracePath) || (traceFromFrame && (!tracePath || !traceAddress || traceFromFrame > frames || traceFromFrame > traceStopFrame)) || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (settleFrames && !untilScene) || (barrierState && !ringMode) || (missedFromFrame != UINT_MAX && (!ringMode || missedFromFrame > frames)) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
+		fprintf(stderr, "Usage: mgba-link --rom FILE (--bios FILE | --hle) --players 1..4 [--ring (1..16 consoles)] [--ring-missed-from N] [--frames N] [--input CSV] [--screens PREFIX] [--watch ADDRESS] [--expect-poc]\n");
 		return 2;
 	}
-	/* --players counts racers; the optional display is a physical node only. */
-	if (mapRom) ++players;
 	struct Input* inputs = NULL;
 	size_t nInputs = 0;
 	if (inputPath) {
@@ -632,7 +630,7 @@ int main(int argc, char** argv) {
     playback.untilWatch = untilWatch;
     playback.autofire = autofire;
     playback.recording = recordInputPath != NULL;
-    for (unsigned i = 0; i < GBA_RING_MAX_NODES; ++i) playback.recordedKeys[i] = UINT_MAX;
+    for (unsigned i = 0; i < GBA_RING_MAX_PLAYERS; ++i) playback.recordedKeys[i] = UINT_MAX;
 	struct Player* p = calloc(players, sizeof(*p));
 	if (!p) { free(inputs); return 2; }
 	struct GBASIOLockstepCoordinator stock;
@@ -705,7 +703,7 @@ int main(int argc, char** argv) {
 				fprintf(stderr, "BIOS/ROM load failed\n"); goto done;
 			}
 		}
-		if (!mCoreLoadFile(core, mapRom && i == players - 1 ? mapRom : rom)) { fprintf(stderr, "ROM load failed\n"); goto done; }
+		if (!mCoreLoadFile(core, rom)) { fprintf(stderr, "ROM load failed\n"); goto done; }
 		struct GBA* gba = core->board;
 		if (ringMode) {
 			if (!GBASIORingAttach(&ring, &p[i].ring)) goto done;
@@ -738,7 +736,7 @@ int main(int argc, char** argv) {
 	uint64_t stagnantSteps = 0;
 	uint32_t barrierRound = 0;
 	int barrierOwner = -1;
-	bool frozen[GBA_RING_MAX_NODES] = { false };
+	bool frozen[GBA_RING_MAX_PLAYERS] = { false };
 	for (;;) {
         if (emulationErrors) {
 #ifdef ENABLE_DEBUGGERS
@@ -774,6 +772,7 @@ int main(int argc, char** argv) {
         if (debugger.platform->setBreakpoint(debugger.platform, &trace.module, &bp) < 0) goto done;
 	}
 #endif
+		if (minFrame >= missedFromFrame) ring.captureMisses = true;
 		if (minFrame >= breakFrame) ring.openInputs = 1;
 		if (minFrame >= restoreFrame) ring.openInputs = 0;
 		if (barrierState && minFrame > frames + 240) {
@@ -1073,7 +1072,13 @@ int main(int argc, char** argv) {
 			if (fclose(f)) result = 1;
 		}
 	}
-	printf("]}\n");
+	printf("],\"missedSamples\":[");
+    for (unsigned i = 0; i < ring.missSampleCount; ++i) {
+        const struct GBASIORingMiss* m = &ring.missSamples[i];
+        printf("%s{\"slot\":%u,\"frame\":%u,\"pc\":%u,\"lr\":%u,\"cpsr\":%u,\"vcount\":%u,\"ime\":%u,\"ie\":%u,\"irq\":%u,\"dma\":%d}",
+               i ? "," : "", m->slot, m->frame, m->pc, m->lr, m->cpsr, m->vcount, m->ime, m->ie, m->irq, m->dma);
+    }
+    printf("]}\n");
 	if (expectPoc && (!ring.transfers || ring.collisions || ring.missedReceivers)) result = 1;
 done:
 #ifdef ENABLE_DEBUGGERS
