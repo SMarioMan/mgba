@@ -339,8 +339,9 @@ private slots:
         auto app = GBAApp::app();
         app->setQuitOnLastWindowClosed(false);
         QTemporaryDir settings;
-        QString rom = qEnvironmentVariable("MGBA_RING_GUI_BOOT_ROM");
-        if (rom.isEmpty()) QSKIP("Set MGBA_RING_GUI_BOOT_ROM to a --boot-ring ROM");
+        bool titleEntry = qEnvironmentVariableIntValue("MGBA_RING_GUI_TITLE_ENTRY");
+        QString rom = qEnvironmentVariable(titleEntry ? "MGBA_RING_GUI_ROM" : "MGBA_RING_GUI_BOOT_ROM");
+        if (rom.isEmpty()) QSKIP("Set MGBA_RING_GUI_ROM for title entry, or MGBA_RING_GUI_BOOT_ROM for direct boot");
         QByteArray bios = qEnvironmentVariable("MGBA_RING_GUI_BIOS").toUtf8();
         int launched = qEnvironmentVariableIntValue("MGBA_RING_GUI_PLAYERS");
         if (!launched) launched = 8;
@@ -424,8 +425,13 @@ private slots:
             auto fields = fixture.readLine().trimmed().split(',');
             if (fields.size() != 3) continue;
             unsigned frame = fields[0].toUInt(), slot = fields[1].toUInt();
-            if (frame < 1500) continue; // This ROM boots directly into Ring Link.
-            inputs[slot].events.append(qMakePair(frame >= 2000 ? frame + 600 : frame, fields[2].toUInt(nullptr,16)));
+            if (frame < 1500 && !titleEntry) continue;
+            auto event = qMakePair(frame >= 2000 ? frame + 600 : frame, fields[2].toUInt(nullptr,16));
+            inputs[slot].events.append(event);
+            // Map consoles run the same title/menu ROM. Enter Ring Link on
+            // them too, without giving them a racer input after discovery.
+            if (titleEntry && !slot && frame < 1500)
+                for (int map = 8; map < launched; ++map) inputs[map].events.append(event);
         }
         auto windows = app->windows();
         for (int i = 0; i < launched; ++i) {

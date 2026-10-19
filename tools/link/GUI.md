@@ -290,3 +290,9 @@ validation is still required before re-enabling its worker default.
 The old backend is retired through its logger before proxy replacement, so
 hardware teardown executes on the thread owning its GL context. Resetting
 all eight active hardware backends also passes the sanitizer replay.
+
+The `scriptedLaunch` Qt regression can also enter through the ordinary title
+menu: set `MGBA_RING_GUI_TITLE_ENTRY=1`, `MGBA_RING_GUI_ROM` to the ordinary
+ring ROM, and `MGBA_RING_GUI_PLAYERS=16`. It enters Ring Link on every console,
+including consoles beyond eight, then verifies gameplay, silent maps, captions
+and independent settings. Without this switch it uses the direct-boot fixture.
