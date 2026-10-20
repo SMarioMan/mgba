@@ -10,6 +10,7 @@
 #include "platform/qt/GBAApp.h"
 #include "platform/qt/Window.h"
 #include "platform/qt/DisplayGL.h"
+#include "platform/qt/FrameView.h"
 #include "platform/qt/LogController.h"
 #ifdef BUILD_SDL
 #include "platform/sdl/sdl-events.h"
@@ -241,13 +242,20 @@ private slots:
         controller->setPaused(false);
         QTRY_VERIFY_WITH_TIMEOUT(controller->frameCounter() >= 60, 30000);
         if (qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE"))
-            QVERIFY(controller->hardwareAccelerated());
+            QTRY_VERIFY_WITH_TIMEOUT(controller->hardwareAccelerated(), 10000);
         controller->setPaused(true);
         QTRY_VERIFY_WITH_TIMEOUT(controller->isPaused(), 10000);
         QImage paused = controller->getPixels();
         int expectedScale = qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE") ? std::max(1, scale) : 1;
         QCOMPARE(paused.size(), QSize(240 * expectedScale, 160 * expectedScale));
         QCOMPARE(controller->getPixels(), paused);
+        if (scale == -2) {
+            FrameView view(window->controller());
+            QTRY_VERIFY_WITH_TIMEOUT(controller->isPaused(), 10000);
+            view.show();
+            QVERIFY(QMetaObject::invokeMethod(&view, "updateTiles", Qt::DirectConnection));
+            view.close();
+        }
         controller->setPaused(false);
         window->close();
         QTRY_VERIFY_WITH_TIMEOUT(app->windows().isEmpty(), 10000);
@@ -938,6 +946,7 @@ private slots:
             for (int i = 0; i < windows.size(); ++i) {
                 QString path = QDir(captures).filePath(QString("P%1").arg(i+1));
                 QVERIFY(QDir().mkpath(path));
+                int previousCaptures = QDir(path).entryList({"*.png"}, QDir::Files).size();
                 {
                     CoreController::Interrupter interrupter(windows[i]->controller());
                     QByteArray directory = QFile::encodeName(path);
@@ -946,7 +955,7 @@ private slots:
                     mDirectorySetMapOptions(&windows[i]->controller()->thread()->core->dirs, &options);
                 }
                 windows[i]->controller()->screenshot();
-                QTRY_VERIFY_WITH_TIMEOUT(!QDir(path).entryList({"*.png"}, QDir::Files).isEmpty(), 10000);
+                QTRY_VERIFY_WITH_TIMEOUT(QDir(path).entryList({"*.png"}, QDir::Files).size() > previousCaptures, 10000);
             }
 #else
             QFAIL("Screenshot capture requires PNG support");

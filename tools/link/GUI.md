@@ -336,3 +336,13 @@ state, using the same uninterrupted collection as the audio test. Repeatedly
 interrupting eight GL producers while waiting for results adds substantial
 measurement overhead. Final state, scoring, sprite and protocol checks still
 run with all cores interrupted together.
+
+The eight-window 100cc GP replay with P4/Bowser passes with software and native
+OpenGL GBA rendering. Saved results PNGs show every native portrait on every
+window; MKSC's independent still-image check permits the measured two-level
+RGB rounding difference between renderers. This does not reproduce or establish
+a fix for the reported intermittent portrait disappearance on Windows.
+The readback regression also opens/updates/closes paused Frame View, waits for
+queued hardware setup, and restores its scale setting between cases. Screenshot
+validation requires a new file even when its output directory already contains
+older captures.
