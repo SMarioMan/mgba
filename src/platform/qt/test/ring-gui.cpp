@@ -208,6 +208,51 @@ private slots:
         }
 #endif
     }
+    void frameReadback_data() {
+        QTest::addColumn<int>("scale");
+        QTest::newRow("default") << -2;
+        QTest::newRow("zero") << 0;
+        QTest::newRow("negative") << -1;
+        QTest::newRow("double") << 2;
+    }
+    void frameReadback() {
+        QFETCH(int, scale);
+        if (qEnvironmentVariableIsEmpty("MGBA_RING_GUI_ROM") || qEnvironmentVariableIsEmpty("MGBA_RING_GUI_BIOS"))
+            QSKIP("Set MGBA_RING_GUI_ROM and MGBA_RING_GUI_BIOS");
+        GBAApp* app = GBAApp::app();
+        app->setQuitOnLastWindowClosed(false);
+        QTemporaryDir directory;
+        QString rom = directory.filePath("readback.gba");
+        QVERIFY(QFile::copy(qEnvironmentVariable("MGBA_RING_GUI_ROM"), rom));
+        if (scale != -2) config->setOption("videoScale", scale);
+        for (const char* key : {"savegamePath", "savestatePath", "screenshotPath", "cheatsPath"})
+            config->setOption(key, directory.path().toUtf8().constData());
+        CoreManager manager;
+        manager.setConfig(config->config());
+        Window* window = app->newWindow();
+        QVERIFY(window);
+        CoreController* controller = manager.loadGame(rom);
+        QVERIFY(controller);
+        QImage beforeStart = controller->getPixels();
+        controller->setPaused(true);
+        window->setController(controller);
+        QTRY_VERIFY_WITH_TIMEOUT(controller->hasStarted(), 10000);
+        QVERIFY(beforeStart.isNull());
+        controller->setPaused(false);
+        QTRY_VERIFY_WITH_TIMEOUT(controller->frameCounter() >= 60, 30000);
+        if (qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE"))
+            QVERIFY(controller->hardwareAccelerated());
+        controller->setPaused(true);
+        QTRY_VERIFY_WITH_TIMEOUT(controller->isPaused(), 10000);
+        QImage paused = controller->getPixels();
+        int expectedScale = qEnvironmentVariableIntValue("MGBA_RING_GUI_HARDWARE") ? std::max(1, scale) : 1;
+        QCOMPARE(paused.size(), QSize(240 * expectedScale, 160 * expectedScale));
+        QCOMPARE(controller->getPixels(), paused);
+        controller->setPaused(false);
+        window->close();
+        QTRY_VERIFY_WITH_TIMEOUT(app->windows().isEmpty(), 10000);
+        config->setOption("videoScale", 1);
+    }
     void writableArguments() {
         // Include power-of-two argc values: the old Windows vector then had
         // no spare allocation for the mandatory terminating pointer.
@@ -740,7 +785,7 @@ private slots:
 		timer.start();
 		qint64 nextProgress = 30000;
 		while (!entered && timer.elapsed() < (qEnvironmentVariableIntValue("MGBA_RING_GUI_VISUAL") ? 1800000 : 600000)) {
-            if (audioCheck) {
+			if (audioCheck || finishScene) {
                 // qWait polls GUI events between sleeps. With video sync the
                 // reference producer waits for those polls, manufacturing
                 // stalls that do not occur in the application's event loop.
@@ -748,7 +793,7 @@ private slots:
                 QTimer::singleShot(250, &desktop, &QEventLoop::quit);
                 desktop.exec();
             } else QTest::qWait(20);
-            if (audioCheck) {
+            if (audioCheck || finishScene) {
                 bool allRacing = true, allComplete = true;
                 unsigned required = 2 | (finishScene ? 4 : 0);
                 for (int i = 0; i < players; ++i) {
@@ -756,7 +801,7 @@ private slots:
                     allRacing &= (progress & 1) != 0;
                     allComplete &= (progress & required) == required;
                 }
-                if (allRacing && !audioMeasured) {
+                if (audioCheck && allRacing && !audioMeasured) {
                     for (int i = 0; i < players; ++i) {
                         mCoreThread* thread = windows[i]->controller()->thread();
                         mCoreSyncLockAudio(&thread->impl->sync);
@@ -782,7 +827,7 @@ private slots:
                 }
                 if (!allComplete) {
                     if (timer.elapsed() >= nextProgress) {
-                        qInfo("GUI audio: collecting uninterrupted %u-frame moving window", inputs[0].speedWindow);
+                        qInfo("GUI %s: collecting uninterrupted %u-frame moving window", audioCheck ? "audio" : "replay", inputs[0].speedWindow);
                         nextProgress += 30000;
                     }
                     continue;
@@ -828,10 +873,27 @@ private slots:
                 }
                 if (finishScene && core->rawRead32(core, 0x03002E20, -1) != finishScene) { entered = false; continue; }
                 if (finishScene) {
-                    QCOMPARE(core->rawRead8(core, 0x03003620, -1), 2U);
-                    QCOMPARE(core->rawRead8(core, 0x03003621, -1), 32U);
+                    unsigned expectedEngine = qEnvironmentVariableIsSet("MGBA_RING_GUI_ENGINE") ?
+                        qEnvironmentVariable("MGBA_RING_GUI_ENGINE").toUInt() : 2U;
+                    QCOMPARE(core->rawRead8(core, 0x03003620, -1), expectedEngine);
                     uint32_t host = core->rawRead32(core, 0x03003638, -1);
-                    QCOMPARE(core->rawRead8(core, host + 0x4C, -1) & 7, 6U);
+                    if (mode == "gp") {
+                        unsigned header = core->rawRead8(core, 0x03003621, -1);
+                        QVERIFY(header >= 32 && header < 52);
+                        QCOMPARE(core->rawRead8(core, 0x0300362B, -1), 0x85U);
+                        unsigned points = 0;
+                        for (unsigned racer = 0; racer < 8; ++racer) {
+                            uint32_t driver = core->rawRead32(core, 0x03003638 + racer * 4, -1);
+                            points += core->rawRead8(core, driver + 0xC4, -1);
+                        }
+                        // The scene pointer changes before its initializer
+                        // awards the cup points. Wait for the completed table.
+                        if (points < 19) { entered = false; continue; }
+                        QVERIFY(points <= 76);
+                    } else {
+                        QCOMPARE(core->rawRead8(core, 0x03003621, -1), 32U);
+                        QCOMPARE(core->rawRead8(core, host + 0x4C, -1) & 7, 6U);
+                    }
                     QVERIFY(core->rawRead8(core, host + 0xC7, -1) >= 0x83);
                 }
 				if (core->frameCounter(core) < 4901 || (ringTopology && !wireLoss && !inputs[i].speedComplete) || core->rawRead8(core, 0x0300361B, -1) != unsigned(players)) { entered = false; continue; }
@@ -870,6 +932,26 @@ private slots:
 			if (timer.elapsed() >= nextProgress) nextProgress += 30000;
 		}
 		QVERIFY2(entered, "GUI windows did not enter a linked race through keypad input");
+        QString captures = qEnvironmentVariable("MGBA_RING_GUI_SCREENSHOTS");
+        if (!captures.isEmpty()) {
+#ifdef USE_PNG
+            for (int i = 0; i < windows.size(); ++i) {
+                QString path = QDir(captures).filePath(QString("P%1").arg(i+1));
+                QVERIFY(QDir().mkpath(path));
+                {
+                    CoreController::Interrupter interrupter(windows[i]->controller());
+                    QByteArray directory = QFile::encodeName(path);
+                    mCoreOptions options = {};
+                    options.screenshotPath = directory.data();
+                    mDirectorySetMapOptions(&windows[i]->controller()->thread()->core->dirs, &options);
+                }
+                windows[i]->controller()->screenshot();
+                QTRY_VERIFY_WITH_TIMEOUT(!QDir(path).entryList({"*.png"}, QDir::Files).isEmpty(), 10000);
+            }
+#else
+            QFAIL("Screenshot capture requires PNG support");
+#endif
+        }
 		qInfo("GUI %s/%d %s with real BIOS in %lld ms", qPrintable(mode), players,
               wireLoss ? "survived a start-time wire loss" : "entered", timer.elapsed());
 #ifdef BUILD_SDL

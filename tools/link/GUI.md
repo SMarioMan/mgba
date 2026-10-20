@@ -296,3 +296,43 @@ menu: set `MGBA_RING_GUI_TITLE_ENTRY=1`, `MGBA_RING_GUI_ROM` to the ordinary
 ring ROM, and `MGBA_RING_GUI_PLAYERS=16`. It enters Ring Link on every console,
 including consoles beyond eight, then verifies gameplay, silent maps, captions
 and independent settings. Without this switch it uses the direct-boot fixture.
+
+For a recorded GP finish replay, `ring:gp-8` accepts
+`MGBA_RING_GUI_FINISH_SCENE` (the ROM's Thumb `results_main` address), just as
+the existing Vs. finish replay does. `MGBA_RING_GUI_ENGINE` defaults to 2
+(150cc); set 1 for a 100cc recording. GP checks retain the five-lap Retro
+finish flag and native 19-point-per-race award total, and wait for the results
+initializer to publish those points. `MGBA_RING_GUI_SCREENSHOTS` optionally
+names a persistent directory for completed-frame PNG captures in P1..P8
+subdirectories. Capture runs on the core thread so the native hardware
+renderer keeps its owning GL context. PNG support is required when requested.
+
+The headless runner's `--capture-prefix PATH --capture-scene ADDRESS` captures
+one completed PPM frame per console on each entry to a scene. The optional
+`--capture-delay N` defaults to 60 frames after entry. With `--video-log`,
+results diagnostics include the eight uploaded portrait hashes and menu IDs,
+a mask comparing their opaque pixels with the actual displayed frame, palette
+hashes, course ID, and colored map-pixel counts. These diagnostics support the
+full-cup game regression; they do not change emulation or link scheduling.
+
+Hardware frame readback for GUI still images now executes through
+`mCoreThreadRunFunction`, after renderer initialization. It copies the pixels
+before the core resumes. The old GUI-thread read could run before GL setup
+and produced a startup SIGSEGV in `CoreController::getPixels` during the
+eight-window GP replay. Software still-image copies also hold the existing
+completed-buffer mutex. Frame View takes its readback before interrupting the
+core or locking its frame-callback mutex.
+
+Qt now defaults `videoScale` to 1; GUI and native GL scale changes clamp zero
+and negative values to 1. A fresh configuration previously passed zero from
+an unset option, creating an empty render target. The `frameReadback` Qt test
+checks early window readback and stable paused images at default, zero,
+negative and 2x scales; all four cases pass with software and hardware GBA
+rendering. Use the usual ROM/BIOS environment variables and the display,
+hardware and threading switches described above to run it.
+
+Finish replays wait for atomic frame/scene milestones before inspecting core
+state, using the same uninterrupted collection as the audio test. Repeatedly
+interrupting eight GL producers while waiting for results adds substantial
+measurement overhead. Final state, scoring, sprite and protocol checks still
+run with all cores interrupted together.

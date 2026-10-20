@@ -473,6 +473,7 @@ void DisplayGL::resizeContext() {
 }
 
 void DisplayGL::setVideoScale(int scale) {
+	scale = std::max(1, scale);
 	if (m_context) {
 		m_painter->interrupt();
 		mCoreConfigSetIntValue(&m_context->thread()->core->config, "videoScale", scale);

@@ -153,6 +153,9 @@ void FrameView::updateTilesGBA(bool) {
 	if (m_ui.freeze->checkState() == Qt::Checked) {
 		return;
 	}
+	// Hardware readback needs the core thread and its frame callback mutex.
+	// Read before taking either the interrupter or this view's mutex.
+	updateRendered();
 	QMutexLocker locker(&m_mutex);
 	m_queue.clear();
 	{
@@ -265,7 +268,6 @@ void FrameView::updateTilesGBA(bool) {
 			QPixmap::fromImage(backdropImage),
 			{}, {0, 0}, false, true
 		});
-		updateRendered();
 	}
 	invalidateQueue(QSize(GBA_VIDEO_HORIZONTAL_PIXELS, GBA_VIDEO_VERTICAL_PIXELS));
 }
@@ -325,6 +327,7 @@ void FrameView::updateTilesGB(bool) {
 	if (m_ui.freeze->checkState() == Qt::Checked) {
 		return;
 	}
+	updateRendered();
 	m_queue.clear();
 	{
 		CoreController::Interrupter interrupter(m_controller);
@@ -378,7 +381,6 @@ void FrameView::updateTilesGB(bool) {
 			{}, origin, false, false
 		});
 
-		updateRendered();
 	}
 	invalidateQueue(m_controller->screenDimensions());
 }
@@ -481,7 +483,6 @@ void FrameView::invalidateQueue(const QSize& dims) {
 
 	QPixmap composited;
 	if (m_framebuffer.isNull()) {
-		updateRendered();
 		composited = m_rendered;
 	} else {
 		QImage framebuffer(m_framebuffer);

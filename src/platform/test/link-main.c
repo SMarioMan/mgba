@@ -7,6 +7,7 @@
 #include <mgba/internal/gba/sio/ring.h>
 #include <mgba-util/vfs.h>
 #include <mgba-util/audio-buffer.h>
+#include <mgba-util/image.h>
 #ifdef ENABLE_DEBUGGERS
 #include <mgba/debugger/debugger.h>
 #endif
@@ -26,11 +27,18 @@ struct Player {
     FILE* audio;
     uint32_t audioFrames;
     bool audioError;
+    uint32_t captureLastScene;
+    unsigned captureStartFrame;
+    bool captureTaken;
 };
 
 static FILE* videoLog;
 static FILE* progressLog;
 static unsigned videoFrom;
+static const char* capturePrefix;
+static uint32_t captureScene;
+static unsigned captureDelay = 60;
+static bool captureFailed;
 static unsigned ringQuantum = 256;
 static uint32_t audioState, timingState, soundTable;
 static struct { uint32_t address; uint64_t cycles; } cycleProfile[32768];
@@ -64,10 +72,46 @@ static void profileInstruction(struct ARMCore* cpu, void* context) {
     profile->pending = true;
 }
 
+static bool writeScreen(const char* path, const mColor* pixels) {
+    FILE* f = fopen(path, "wb");
+    if (!f) { perror(path); return false; }
+    bool ok = fprintf(f, "P6\n240 160\n255\n") > 0;
+    for (unsigned j = 0; j < 240 * 160; ++j) {
+        mColor c = pixels[j];
+#ifdef COLOR_16_BIT
+#ifdef COLOR_5_6_5
+        unsigned char rgb[] = { (c & 31) * 255 / 31, ((c >> 5) & 63) * 255 / 63, ((c >> 11) & 31) * 255 / 31 };
+#else
+        unsigned char rgb[] = { (c & 31) * 255 / 31, ((c >> 5) & 31) * 255 / 31, ((c >> 10) & 31) * 255 / 31 };
+#endif
+#else
+        unsigned char rgb[] = { c & 255, (c >> 8) & 255, (c >> 16) & 255 };
+#endif
+        if (fwrite(rgb, 1, 3, f) != 3) ok = false;
+    }
+    if (fclose(f)) ok = false;
+    return ok;
+}
+
 static void captureFrame(void* context) {
     struct Player* player = context;
     memcpy(player->completedPixels, player->pixels, sizeof(player->pixels));
     unsigned frame = player->core->frameCounter(player->core);
+    if (capturePrefix) {
+        uint32_t scene = player->core->rawRead32(player->core, 0x03002E20, -1);
+        if (scene != player->captureLastScene) {
+            player->captureLastScene = scene;
+            player->captureStartFrame = frame;
+            player->captureTaken = false;
+        }
+        if (scene == captureScene && !player->captureTaken && frame - player->captureStartFrame >= captureDelay) {
+            char path[4096];
+            player->captureTaken = true;
+            if (snprintf(path, sizeof(path), "%s-f%u-p%u.ppm", capturePrefix, frame, player->id) >= (int) sizeof(path) ||
+                !writeScreen(path, player->completedPixels)) captureFailed = true;
+        }
+    }
+
     struct mAudioBuffer* audio = player->core->getAudioBuffer(player->core);
     if (player->audio && frame >= videoFrom) {
         int16_t samples[2048];
@@ -187,6 +231,53 @@ static void captureFrame(void* context) {
                 mapOverviewHash = (mapOverviewHash ^ (gba->video.palette[176 + i] & 0x7FFF)) * 16777619U;
         }
         fprintf(videoLog, ",%u", mapOverviewHash);
+        unsigned coloredPixels = 0;
+        if (dispcnt == 0x1441) {
+            for (unsigned i = 0; i < 4096; ++i) {
+                unsigned color = ((uint8_t*)gba->video.vram)[0x4000 + i];
+                if (color && (gba->video.palette[color] & 0x7FFF)) ++coloredPixels;
+            }
+        }
+        fprintf(videoLog, ",%u,%u", player->core->rawRead8(player->core, 0x03003621, -1), coloredPixels);
+        unsigned portraitShown = 0;
+        for (unsigned row = 0; row < 8; ++row) {
+            unsigned matched = 0, opaque = 0;
+            uint32_t hash = 0;
+            if (captureScene && player->core->rawRead32(player->core, 0x03002E20, -1) == captureScene && (dispcnt & 0x107) == 0x101) {
+                hash = 2166136261U;
+                uint16_t control = player->core->rawRead16(player->core, 0x04000008, -1);
+                unsigned map = ((control >> 8) & 31) * 0x800, base = ((control >> 2) & 3) * 0x4000;
+                for (unsigned cell = 0; cell < 4; ++cell) {
+                    unsigned location = ((3 + row * 2 + cell / 2) * 32 + 4 + cell % 2) * 2;
+                    unsigned tile = ((uint8_t*)gba->video.vram)[map + location] | ((uint8_t*)gba->video.vram)[map + location + 1] << 8;
+                    for (unsigned byte = 0; byte < 32; ++byte)
+                        hash = (hash ^ ((uint8_t*)gba->video.vram)[(base + (tile & 1023) * 32 + byte) & 0x1FFFF]) * 16777619U;
+                    for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 8; ++x) {
+                        unsigned tx = tile & 0x400 ? 7 - x : x, ty = tile & 0x800 ? 7 - y : y;
+                        unsigned packed = ((uint8_t*)gba->video.vram)[base + (tile & 1023) * 32 + ty * 4 + tx / 2];
+                        unsigned color = (packed >> ((tx & 1) * 4)) & 15;
+                        if (!color) continue;
+                        mColor expected = mColorFrom555(gba->video.palette[(tile >> 12) * 16 + color]);
+                        mColor actual = player->completedPixels[(24 + row * 16 + cell / 2 * 8 + y) * 240 + 32 + cell % 2 * 8 + x];
+#ifdef COLOR_16_BIT
+                        if (expected == actual) ++matched;
+#else
+                        if ((expected & 0xFFFFFF) == (actual & 0xFFFFFF)) ++matched;
+#endif
+                        ++opaque;
+                    }
+                }
+            }
+            if (opaque >= 128 && matched * 100 >= opaque * 95) portraitShown |= 1U << row;
+            fprintf(videoLog, ",%u", hash);
+        }
+        for (unsigned row = 0; row < 8; ++row)
+            fprintf(videoLog, ",%u", player->core->rawRead16(player->core, 0x0300007E + row * 16, -1));
+        uint32_t resultPaletteHash = 2166136261U;
+        for (unsigned i = 192; i < 256; ++i)
+            resultPaletteHash = (resultPaletteHash ^ (gba->video.palette[i] & 0x7FFF)) * 16777619U;
+        fprintf(videoLog, ",%u,%u", portraitShown, resultPaletteHash);
+
         for (unsigned i = 0; i < 8; ++i) fprintf(videoLog, ",%u", kartPositions[i]);
         if (soundTable) {
             uint32_t camera = player->core->rawRead32(player->core, 0x03003658, -1);
@@ -549,6 +640,9 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--bios")) bios = value;
 		else if (!strcmp(option, "--input")) inputPath = value;
 		else if (!strcmp(option, "--screens")) prefix = value;
+        else if (!strcmp(option, "--capture-prefix")) capturePrefix = value;
+        else if (!strcmp(option, "--capture-scene") && number(value, &n) && n >= 0x08000000 && n < 0x0A000000) captureScene = n;
+        else if (!strcmp(option, "--capture-delay") && number(value, &n) && n <= 10000) captureDelay = n;
 		else if (!strcmp(option, "--video-log")) videoPath = value;
 		else if (!strcmp(option, "--progress-file")) progressPath = value;
 		else if (!strcmp(option, "--profile-file")) profilePath = value;
@@ -591,7 +685,7 @@ int main(int argc, char** argv) {
 		else if (!strcmp(option, "--restore-frame") && number(value, &n) && n < UINT_MAX) restoreFrame = n;
 		else { fprintf(stderr, "Invalid option: %s %s\n", option, value); return 2; }
 	}
-	if (!rom || (!hle && !bios) || (hle && bios) || players < 1U || players > (ringMode ? GBA_RING_MAX_PLAYERS : 4U) || !frames || expectHost >= players || tracePlayer >= players || (traceStopFrame != UINT_MAX && !tracePath) || (traceFromFrame && (!tracePath || !traceAddress || traceFromFrame > frames || traceFromFrame > traceStopFrame)) || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (settleFrames && !untilScene) || (barrierState && !ringMode) || (missedFromFrame != UINT_MAX && (!ringMode || missedFromFrame > frames)) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
+	if ((capturePrefix && !captureScene) || (!capturePrefix && captureScene) || !rom || (!hle && !bios) || (hle && bios) || players < 1U || players > (ringMode ? GBA_RING_MAX_PLAYERS : 4U) || !frames || expectHost >= players || tracePlayer >= players || (traceStopFrame != UINT_MAX && !tracePath) || (traceFromFrame && (!tracePath || !traceAddress || traceFromFrame > frames || traceFromFrame > traceStopFrame)) || (dumpAddress > UINT32_MAX - dumpWords * 4) || (untilWatch && (!watch || !untilScene)) || (untilScene && !barrierState) || (settleFrames && !untilScene) || (barrierState && !ringMode) || (missedFromFrame != UINT_MAX && (!ringMode || missedFromFrame > frames)) || (expectPoc && !ringMode) || (breakFrame != UINT_MAX && (!ringMode || restoreFrame <= breakFrame))) {
 		fprintf(stderr, "Usage: mgba-link --rom FILE (--bios FILE | --hle) --players 1..4 [--ring (1..16 consoles)] [--ring-missed-from N] [--frames N] [--input CSV] [--screens PREFIX] [--watch ADDRESS] [--expect-poc]\n");
 		return 2;
 	}
@@ -649,7 +743,10 @@ int main(int argc, char** argv) {
 	if (videoPath) {
 		videoLog = fopen(videoPath, "w");
 		if (!videoLog) { perror(videoPath); goto done; }
-        fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus,menuCursors,starMask,shrinkMask,booMask,roadDisplayBuffer,roadWriteBuffer,roadProjectionHash,backdropColor,cursorPaletteHash,mapOverviewHash");
+        fprintf(videoLog, "frame,player,dispcnt,objects,commits,kart0,kart1,kart2,kart3,kart4,kart5,kart6,kart7,invalidObjects,markers,bitmapHash,simulationFrames,skyHash,musicHeader,musicTempo,leadLap,skyRoadPixels,sceneMain,balloonForeignPixels,musicStatus,menuCursors,starMask,shrinkMask,booMask,roadDisplayBuffer,roadWriteBuffer,roadProjectionHash,backdropColor,cursorPaletteHash,mapOverviewHash,headerIndex,mapOverviewColoredPixels");
+        for (unsigned i = 0; i < 8; ++i) fprintf(videoLog, ",resultPortrait%uHash", i);
+        for (unsigned i = 0; i < 8; ++i) fprintf(videoLog, ",resultCharacter%u", i);
+        fprintf(videoLog, ",resultPortraitShown,resultPaletteHash");
         for (unsigned i = 0; i < 8; ++i) fprintf(videoLog, ",kartPosition%u", i);
         if (soundTable) fprintf(videoLog, ",localPlayer,cameraPlayer,fifoSource,pcmBufferEnd,pcmCounter,soundIdent,engineHeader,voiceHeader,effectHeader");
         if (timingState) fprintf(videoLog, ",exchangeCycles,renderCycles,profileFrame,publishCycles,mixCycles");
@@ -898,7 +995,7 @@ int main(int argc, char** argv) {
 			fprintf(profile, "%08x,%" PRIu64 "\n", cycleProfile[i].address - 1, cycleProfile[i].cycles);
 		fclose(profile);
 	}
-	result = snapshotFailed || (untilScene && !allSceneMatch) ? 1 : 0;
+	result = captureFailed || snapshotFailed || (untilScene && !allSceneMatch) ? 1 : 0;
 	printf("{\"bios\":\"%s\",\"topology\":\"%s\",\"profileScheduling\":\"%s\",\"players\":%u,\"frames\":%u,\"steps\":%llu,\"transfers\":%llu,\"missedReceivers\":%llu,\"collisions\":%llu,\"nodes\":[", hle ? "hle" : "real", ringMode ? "ring" : "stock", profilePath ? "quantum" : "none", players, frames, (unsigned long long) steps, (unsigned long long) ring.transfers, (unsigned long long) ring.missedReceivers, (unsigned long long) ring.collisions);
 	for (unsigned i = 0; i < players; ++i) {
 		struct mCore* core = p[i].core;
@@ -1053,23 +1150,7 @@ int main(int argc, char** argv) {
 		if (prefix) {
 			char path[4096];
 			if (snprintf(path, sizeof(path), "%s-%u.ppm", prefix, i) >= (int) sizeof(path)) { result = 1; continue; }
-			FILE* f = fopen(path, "wb");
-			if (!f) { perror(path); result = 1; continue; }
-			fprintf(f, "P6\n240 160\n255\n");
-			for (unsigned j = 0; j < 240 * 160; ++j) {
-				mColor c = p[i].completedPixels[j];
-#ifdef COLOR_16_BIT
-#ifdef COLOR_5_6_5
-				unsigned char rgb[] = { (c & 31) * 255 / 31, ((c >> 5) & 63) * 255 / 63, ((c >> 11) & 31) * 255 / 31 };
-#else
-				unsigned char rgb[] = { (c & 31) * 255 / 31, ((c >> 5) & 31) * 255 / 31, ((c >> 10) & 31) * 255 / 31 };
-#endif
-#else
-				unsigned char rgb[] = { c & 255, (c >> 8) & 255, (c >> 16) & 255 };
-#endif
-				if (fwrite(rgb, 1, 3, f) != 3) result = 1;
-			}
-			if (fclose(f)) result = 1;
+            if (!writeScreen(path, p[i].completedPixels)) result = 1;
 		}
 	}
 	printf("],\"missedSamples\":[");

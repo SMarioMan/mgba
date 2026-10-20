@@ -2147,6 +2147,7 @@ void GBAVideoGLRendererDrawWindow(struct GBAVideoGLRenderer* renderer, int y) {
 }
 
 void GBAVideoGLRendererSetScale(struct GBAVideoGLRenderer* renderer, int scale) {
+	if (scale < 1) scale = 1;
 	if (scale == renderer->scale) {
 		return;
 	}

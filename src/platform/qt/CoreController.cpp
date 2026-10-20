@@ -249,24 +249,33 @@ const mColor* CoreController::drawContext() {
 }
 
 QImage CoreController::getPixels() {
-	QByteArray buffer;
 	QSize size = screenDimensions();
-	size_t stride = size.width() * BYTES_PER_PIXEL;
-
 	if (!m_hwaccel) {
-		buffer = m_completeBuffer;
-	} else {
-		Interrupter interrupter(this);
-		const void* pixels;
-		m_threadContext.core->getPixels(m_threadContext.core, &pixels, &stride);
-		stride *= BYTES_PER_PIXEL;
-		buffer = QByteArray::fromRawData(static_cast<const char*>(pixels), stride * size.height());
+		QMutexLocker locker(&m_bufferMutex);
+		if (size.isEmpty() || m_completeBuffer.size() < qint64(size.width()) * size.height() * BYTES_PER_PIXEL) return {};
+		return QImage(reinterpret_cast<const uchar*>(m_completeBuffer.constData()),
+		              size.width(), size.height(), size.width() * BYTES_PER_PIXEL,
+		              QImage::Format_RGBX8888).copy();
 	}
 
-	QImage image(reinterpret_cast<const uchar*>(buffer.constData()),
-	             size.width(), size.height(), stride, QImage::Format_RGBX8888);
-	image.bits(); // Cause QImage to detach
-	return image;
+	// A stopped CPU does not make its GL context current on the GUI thread.
+	// Queue readback after renderer initialization and copy its temporary pixels
+	// before emulation resumes, just like the screenshot path.
+	m_readbackImage = {};
+	if (!hasStarted() || mCoreThreadHasExited(&m_threadContext)) return {};
+	mCoreThreadRunFunction(&m_threadContext, [](mCoreThread* thread) {
+		CoreController* controller = static_cast<CoreController*>(thread->userData);
+		QSize dimensions = controller->screenDimensions();
+		if (dimensions.isEmpty()) return;
+		const void* pixels = nullptr;
+		size_t stride = 0;
+		thread->core->getPixels(thread->core, &pixels, &stride);
+		if (!pixels || stride < size_t(dimensions.width())) return;
+		controller->m_readbackImage = QImage(static_cast<const uchar*>(pixels),
+		    dimensions.width(), dimensions.height(), stride * BYTES_PER_PIXEL,
+		    QImage::Format_RGBX8888).copy();
+	});
+	return m_readbackImage;
 }
 
 bool CoreController::isPaused() {

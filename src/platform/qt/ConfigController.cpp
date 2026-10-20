@@ -163,6 +163,7 @@ ConfigController::ConfigController(QObject* parent, const QString& directory)
 	mCoreConfigSetDefaultIntValue(&m_config, "sgb.borders", 1);
 	mCoreConfigSetDefaultIntValue(&m_config, "gb.colors", GB_COLORS_CGB);
 #endif
+	mCoreConfigSetDefaultIntValue(&m_config, "videoScale", 1);
 	mCoreConfigSetDefaultIntValue(&m_config, "preload", true);
 	mCoreConfigMap(&m_config, &m_opts);
 

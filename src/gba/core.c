@@ -451,7 +451,7 @@ static void _GBACoreReloadConfigOption(struct mCore* core, const char* option, c
 		}
 		bool value;
 		if (gbacore->glRenderer.outputTex != (unsigned) -1 && mCoreConfigGetBoolValue(&core->config, "hwaccelVideo", &value) && value) {
-			int scale;
+			int scale = 1;
 			mCoreConfigGetIntValue(config, "videoScale", &scale);
 			GBAVideoGLRendererSetScale(&gbacore->glRenderer, scale);
 		}
@@ -474,6 +474,7 @@ static void _GBACoreReloadConfigOption(struct mCore* core, const char* option, c
 		bool value;
 		if (gbacore->glRenderer.outputTex != (unsigned) -1 && mCoreConfigGetBoolValue(&core->config, "hwaccelVideo", &value) && value) {
 			mCoreConfigGetIntValue(&core->config, "videoScale", &gbacore->glRenderer.scale);
+			if (gbacore->glRenderer.scale < 1) gbacore->glRenderer.scale = 1;
 			renderer = &gbacore->glRenderer.d;
 		} else {
 			gbacore->glRenderer.scale = 1;
@@ -762,6 +763,7 @@ static void _GBACoreReset(struct mCore* core) {
 #ifdef BUILD_GLES3
 		if (gbacore->glRenderer.outputTex != (unsigned) -1 && mCoreConfigGetBoolValue(&core->config, "hwaccelVideo", &value) && value) {
 			mCoreConfigGetIntValue(&core->config, "videoScale", &gbacore->glRenderer.scale);
+			if (gbacore->glRenderer.scale < 1) gbacore->glRenderer.scale = 1;
 			renderer = &gbacore->glRenderer.d;
 		} else {
 			gbacore->glRenderer.scale = 1;

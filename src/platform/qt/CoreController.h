@@ -7,6 +7,7 @@
 
 #include <QByteArray>
 #include <QFile>
+#include <QImage>
 #include <QList>
 #include <QMutex>
 #include <QObject>
@@ -274,6 +275,7 @@ private:
 
 	QByteArray m_activeBuffer;
 	QByteArray m_completeBuffer;
+	QImage m_readbackImage;
 	bool m_hwaccel = false;
 
 	std::unique_ptr<mCacheSet> m_cacheSet;
