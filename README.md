@@ -16,5 +16,6 @@ This README is entirely human-generated.
 - Adds support for up to 16 GBAs to link together using an unconventional network ring topology, inspired by [Faceball2000DX](https://github.com/Zarithya/Faceball2000DX) and [DoubleCherryGB](https://github.com/Zarithya/doublecherryGB-libretro).
   - Currently only supports the [Mario Kart: Super Circuit 8-player mod](https://github.com/SMarioMan/mksc/tree/8player).
 - Supports additional command line arguments to launch multiple instances quickly and easily.
+  - Supports hiding the title bar via the `--hide-menu` launch argument. Temporarily reveal with `Alt`.
 - Improves link performance via improved concurrency scheduling.
 - Adds an input harness for easy automated testing by scripts and AI agents.
